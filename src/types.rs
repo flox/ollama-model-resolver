@@ -125,6 +125,27 @@ pub struct AnnotatedSearchResult {
     pub variant: Option<ModelVariant>,
     pub fit: Option<FitResult>,
     pub error: Option<String>,
+    /// Models filtered from default results because they cannot run locally
+    /// regardless of the user's hardware.
+    pub filtered: Option<FilteredReason>,
+}
+
+/// Reason a model was filtered from default search results.
+/// Cloud-only and platform-restricted models are never locally runnable
+/// regardless of hardware, so they're excluded from `--fit` output by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilteredReason {
+    CloudOnly,
+    PlatformRestricted,
+}
+
+impl fmt::Display for FilteredReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FilteredReason::CloudOnly => write!(f, "cloud-only"),
+            FilteredReason::PlatformRestricted => write!(f, "platform-restricted"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

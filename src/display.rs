@@ -6,7 +6,7 @@ use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, ContentArra
 
 use crate::resolver::ResolutionDiagnostics;
 use crate::sanitize::terminal_line;
-use crate::types::{AnnotatedSearchResult, FitResult, HardwareProfile, ModelVariant};
+use crate::types::{AnnotatedSearchResult, FilteredReason, FitResult, HardwareProfile, ModelVariant};
 
 pub fn print_hardware(hw: &HardwareProfile) {
     println!("{}", "Hardware Profile".bold());
@@ -47,7 +47,15 @@ pub fn print_hardware(hw: &HardwareProfile) {
     println!();
 }
 
-pub fn print_search_results(rows: &[AnnotatedSearchResult], hw: &HardwareProfile) {
+pub fn print_search_results(
+    rows: &[AnnotatedSearchResult],
+    hw: &HardwareProfile,
+    cloud_count: u64,
+    platform_count: u64,
+    fit_count: u64,
+) {
+    let hidden_count = cloud_count + platform_count + fit_count;
+
     print_hardware(hw);
 
     let mut table = Table::new();
@@ -65,18 +73,17 @@ pub fn print_search_results(rows: &[AnnotatedSearchResult], hw: &HardwareProfile
                 ByteSize(variant.weights_bytes).to_string(),
             ),
             _ => {
-                let err = row.error.as_deref().unwrap_or("unavailable");
-                if err.contains("cloud-only") {
-                    ("-".to_string(), "cloud-only".dimmed().to_string(), "-".to_string())
-                } else if err.contains("platform-restricted") {
-                    ("-".to_string(), "platform-restricted".dimmed().to_string(), "-".to_string())
-                } else {
-                    (
-                        "-".to_string(),
-                        terminal_line(err).dimmed().to_string(),
-                        "-".to_string(),
-                    )
-                }
+                let fit_text = match row.filtered {
+                    Some(FilteredReason::CloudOnly) => "cloud-only".dimmed().to_string(),
+                    Some(FilteredReason::PlatformRestricted) => {
+                        "platform-restricted".dimmed().to_string()
+                    }
+                    None => {
+                        let err = row.error.as_deref().unwrap_or("unavailable");
+                        terminal_line(err).dimmed().to_string()
+                    }
+                };
+                ("-" .to_string(), fit_text, "-".to_string())
             }
         };
 
@@ -93,6 +100,24 @@ pub fn print_search_results(rows: &[AnnotatedSearchResult], hw: &HardwareProfile
     }
 
     println!("{table}");
+
+    if hidden_count > 0 {
+        let mut parts = Vec::new();
+        if cloud_count > 0 {
+            parts.push(format!("{cloud_count} cloud-only"));
+        }
+        if platform_count > 0 {
+            parts.push(format!("{platform_count} platform-restricted"));
+        }
+        if fit_count > 0 {
+            parts.push(format!("{fit_count} does not fit"));
+        }
+        let breakdown = parts.join(", ");
+        println!(
+            "  {} hidden. Use --all to show all models.",
+            breakdown.dimmed()
+        );
+    }
 }
 
 

@@ -61,6 +61,10 @@ pub enum Commands {
         #[arg(long, conflicts_with = "no_fit")]
         fit: bool,
 
+        /// Show all search results including cloud-only and platform-restricted models.
+        #[arg(long, conflicts_with = "no_fit")]
+        all: bool,
+
         /// Compatibility flag for library-only search. Library-only is now the default.
         #[arg(long = "no-fit", visible_alias = "fast", conflicts_with = "fit")]
         no_fit: bool,
@@ -186,6 +190,57 @@ mod tests {
             "--no-fit",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parses_all_flag() {
+        let cli = Cli::try_parse_from([
+            "ollama-model-resolver",
+            "search",
+            "qwen",
+            "--fit",
+            "--all",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Search { all, fit, no_fit, .. } => {
+                assert!(all);
+                assert!(fit);
+                assert!(!no_fit);
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn all_conflicts_with_no_fit() {
+        assert!(Cli::try_parse_from([
+            "ollama-model-resolver",
+            "search",
+            "qwen",
+            "--all",
+            "--no-fit",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn all_defaults_false() {
+        let cli = Cli::try_parse_from([
+            "ollama-model-resolver",
+            "search",
+            "qwen",
+            "--fit",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Search { all, .. } => {
+                assert!(!all);
+            }
+            _ => panic!("expected search command"),
+        }
     }
 
     #[test]

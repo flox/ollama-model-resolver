@@ -11,7 +11,7 @@ use crate::local;
 use crate::registry::{self, HttpRegistry, Registry};
 use crate::resolver::{self, ResolveOpts};
 use crate::sanitize::terminal_line;
-use crate::types::{AnnotatedSearchResult, HardwareProfile, SearchResult};
+use crate::types::{AnnotatedSearchResult, FilteredReason, HardwareProfile, SearchResult};
 
 const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -46,13 +46,20 @@ pub fn run(cli: Cli) -> Result<()> {
         margin_pct: cli.margin,
         context_tokens: cli.context_tokens,
         max_manifest_lookups: cli.max_manifest_lookups,
+        fit_filter: false,
+        all: false,
     };
 
     match cli.command {
-        Commands::Search { query, limit, fit, no_fit: _ } => {
+        Commands::Search { query, limit, fit, no_fit: _, all } => {
+            let search_opts = ResolveOpts {
+                fit_filter: fit,
+                all,
+                ..opts
+            };
             if fit {
                 let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
-                cmd_search(&metadata_client, &query, limit, &hw, &opts)
+                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all)
             } else {
                 cmd_search_no_fit(&metadata_client, &query, limit)
             }
@@ -116,17 +123,53 @@ fn cmd_search(
     limit: usize,
     hw: &HardwareProfile,
     opts: &ResolveOpts,
+    all: bool,
 ) -> Result<()> {
+    // Fetch slightly more than limit to compensate for filtering; most models
+    // are downloadable local models, so 5 extra catches the common case where
+    // a few cloud-only entries appear in the top results.
+    let fetch_limit = limit.saturating_add(5);
     let mut results = registry::search_models(client, query)?;
-    results.truncate(limit);
+    results.truncate(fetch_limit);
 
     let mut registry_client = HttpRegistry::new(client);
-    let rows = results
+    let mut rows: Vec<_> = results
         .into_iter()
         .map(|result| annotate_search_result(&mut registry_client, result, hw, opts))
-        .collect::<Vec<_>>();
+        .collect();
 
-    display::print_search_results(&rows, hw);
+    // Filter out cloud-only, platform-restricted, and non-fitting models unless --all.
+    let (cloud_count, platform_count, fit_count) = if all {
+        (0, 0, 0)
+    } else {
+        let mut cloud = 0u64;
+        let mut platform = 0u64;
+        let mut fit = 0u64;
+        rows.retain(|row| {
+            if let Some(FilteredReason::CloudOnly) = row.filtered {
+                cloud += 1;
+                return false;
+            }
+            if let Some(FilteredReason::PlatformRestricted) = row.filtered {
+                platform += 1;
+                return false;
+            }
+            if opts.fit_filter {
+                if let Some(fit_status) = &row.fit {
+                    if !fit_status.fits() {
+                        fit += 1;
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        (cloud, platform, fit)
+    };
+
+    rows.truncate(limit);
+
+    display::print_search_results(&rows, hw, cloud_count, platform_count, fit_count);
     Ok(())
 }
 
@@ -149,13 +192,24 @@ fn annotate_search_result<R: Registry>(
             variant: Some(variant),
             fit: Some(fit),
             error: None,
+            filtered: None,
         },
-        Err(err) => AnnotatedSearchResult {
-            result,
-            variant: None,
-            fit: None,
-            error: Some(err.to_string()),
-        },
+        Err(err) => {
+            let filtered = match &err {
+                ResolverError::ManifestCloudOnly { .. } => Some(FilteredReason::CloudOnly),
+                ResolverError::ManifestPlatformRestricted { .. } => {
+                    Some(FilteredReason::PlatformRestricted)
+                }
+                _ => None,
+            };
+            AnnotatedSearchResult {
+                result,
+                variant: None,
+                fit: None,
+                error: Some(err.to_string()),
+                filtered,
+            }
+        }
     }
 }
 

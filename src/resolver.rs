@@ -12,6 +12,10 @@ pub struct ResolveOpts {
     pub margin_pct: u32,
     pub context_tokens: u32,
     pub max_manifest_lookups: Option<usize>,
+    /// Hide models that do not fit VRAM in search output.
+    pub fit_filter: bool,
+    /// Show all models including cloud-only, platform-restricted, and non-fitting.
+    pub all: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -458,6 +462,8 @@ mod tests {
             margin_pct: 20,
             context_tokens: 8_192,
             max_manifest_lookups: None,
+            fit_filter: false,
+            all: false,
         }
     }
 
@@ -467,6 +473,8 @@ mod tests {
             margin_pct: 20,
             context_tokens: 8_192,
             max_manifest_lookups: None,
+            fit_filter: false,
+            all: false,
         }
     }
 
@@ -476,6 +484,8 @@ mod tests {
             margin_pct: 20,
             context_tokens: 8_192,
             max_manifest_lookups: Some(max_manifest_lookups),
+            fit_filter: false,
+            all: false,
         }
     }
 
