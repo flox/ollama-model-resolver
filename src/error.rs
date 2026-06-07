@@ -26,6 +26,12 @@ pub enum ResolverError {
     #[error("registry manifest unavailable for '{model}:{tag}': {detail}")]
     ManifestUnavailable { model: String, tag: String, detail: String },
 
+    #[error("cloud-only model — no local weights for '{model}:{tag}'")]
+    ManifestCloudOnly { model: String, tag: String },
+
+    #[error("platform-restricted model for '{model}:{tag}' (registry returned {status})")]
+    ManifestPlatformRestricted { model: String, tag: String, status: u16 },
+
     #[error("invalid registry manifest for '{model}:{tag}': {detail}")]
     ManifestInvalid { model: String, tag: String, detail: String },
 

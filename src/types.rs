@@ -38,6 +38,9 @@ pub struct GpuInfo {
 pub struct HardwareProfile {
     pub gpu_name: Option<String>,
     pub vram_total: u64,
+    /// Deprecated: always equal to vram_total. Ollama serves one model at a time,
+    /// so "free" VRAM is meaningless — the current model will be evicted.
+    #[deprecated(since = "0.4.3", note = "Use vram_total; always equal")]
     pub vram_free: u64,
     pub ram_total: u64,
     pub ram_available: u64,
@@ -51,7 +54,9 @@ pub struct HardwareProfile {
 
 impl HardwareProfile {
     pub fn has_gpu(&self) -> bool {
-        self.vram_total > 0 && self.vram_free > 0 && !self.selected_gpu_indices.is_empty()
+        // Ollama serves only one model at a time, so vram_free is irrelevant:
+        // a loaded model can leave it at zero even though the GPU is usable.
+        self.vram_total > 0 && !self.selected_gpu_indices.is_empty()
     }
 
     pub fn visible_gpu_count(&self) -> usize {
@@ -65,9 +70,9 @@ impl HardwareProfile {
     pub fn available_runtime_bytes(&self, allow_split: bool) -> u64 {
         if self.has_gpu() {
             if allow_split {
-                self.vram_free.saturating_add(self.ram_available)
+                self.vram_total.saturating_add(self.ram_available)
             } else {
-                self.vram_free
+                self.vram_total
             }
         } else {
             self.ram_available
@@ -83,9 +88,9 @@ impl HardwareProfile {
         }
 
         match self.gpu_fit_policy {
-            GpuFitPolicy::Best => "single CUDA-visible NVIDIA GPU with the most free VRAM".to_string(),
-            GpuFitPolicy::VisibleSum => "sum of CUDA-visible NVIDIA GPU free VRAM".to_string(),
-            GpuFitPolicy::AllSum => "sum of all detected NVIDIA GPU free VRAM; ignores CUDA_VISIBLE_DEVICES".to_string(),
+            GpuFitPolicy::Best => "single CUDA-visible NVIDIA GPU with the most total VRAM".to_string(),
+            GpuFitPolicy::VisibleSum => "sum of CUDA-visible NVIDIA GPU total VRAM".to_string(),
+            GpuFitPolicy::AllSum => "sum of all detected NVIDIA GPU total VRAM; ignores CUDA_VISIBLE_DEVICES".to_string(),
         }
     }
 }

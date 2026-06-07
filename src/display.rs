@@ -29,10 +29,9 @@ pub fn print_hardware(hw: &HardwareProfile) {
     }
     if hw.has_gpu() {
         println!(
-            "  {:<14} {} / {}",
+            "  {:<14} {}",
             "VRAM basis:".dimmed(),
-            ByteSize(hw.vram_free).to_string().green(),
-            ByteSize(hw.vram_total)
+            ByteSize(hw.vram_total).to_string().green()
         );
     }
     println!(
@@ -65,11 +64,20 @@ pub fn print_search_results(rows: &[AnnotatedSearchResult], hw: &HardwareProfile
                 fit_summary_colored(fit),
                 ByteSize(variant.weights_bytes).to_string(),
             ),
-            _ => (
-                "-".to_string(),
-                terminal_line(row.error.as_deref().unwrap_or("unavailable")).dimmed().to_string(),
-                "-".to_string(),
-            ),
+            _ => {
+                let err = row.error.as_deref().unwrap_or("unavailable");
+                if err.contains("cloud-only") {
+                    ("-".to_string(), "cloud-only".dimmed().to_string(), "-".to_string())
+                } else if err.contains("platform-restricted") {
+                    ("-".to_string(), "platform-restricted".dimmed().to_string(), "-".to_string())
+                } else {
+                    (
+                        "-".to_string(),
+                        terminal_line(err).dimmed().to_string(),
+                        "-".to_string(),
+                    )
+                }
+            }
         };
 
         table.add_row(vec![

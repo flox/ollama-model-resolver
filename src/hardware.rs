@@ -8,6 +8,7 @@ pub fn detect(models_dir: Option<PathBuf>) -> Result<HardwareProfile> {
     detect_with_policy(models_dir, GpuFitPolicy::Best)
 }
 
+#[allow(deprecated)]
 pub fn detect_with_policy(
     models_dir: Option<PathBuf>,
     gpu_fit_policy: GpuFitPolicy,
@@ -174,16 +175,18 @@ fn select_gpu_fit_basis(
 }
 
 fn select_best_visible_gpu(gpus: &[GpuInfo]) -> (Option<String>, u64, u64, Vec<u32>) {
+    // Ollama serves only one model at a time so vram_free is irrelevant.
+    // Pick the CUDA-visible GPU with the most total VRAM.
     let best = gpus
         .iter()
         .filter(|gpu| gpu.visible)
-        .max_by_key(|gpu| (gpu.vram_free, gpu.vram_total));
+        .max_by_key(|gpu| (gpu.vram_total, gpu.index));
 
     best.map(|gpu| {
         (
             Some(format!("{} (GPU {})", gpu.name, gpu.index)),
             gpu.vram_total,
-            gpu.vram_free,
+            gpu.vram_total,
             vec![gpu.index],
         )
     })
@@ -204,7 +207,7 @@ where
         .fold(0_u64, |acc, gpu| acc.saturating_add(gpu.vram_total));
     let free = selected
         .iter()
-        .fold(0_u64, |acc, gpu| acc.saturating_add(gpu.vram_free));
+        .fold(0_u64, |acc, gpu| acc.saturating_add(gpu.vram_total));
     let indices = selected.iter().map(|gpu| gpu.index).collect::<Vec<_>>();
     let label = if selected.len() == 1 {
         format!("{} (GPU {})", selected[0].name, selected[0].index)
@@ -286,6 +289,7 @@ fn existing_ancestor(path: &Path) -> Option<PathBuf> {
     }
 }
 
+#[allow(deprecated)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn best_policy_uses_most_free_visible_gpu() {
+    fn best_policy_uses_most_total_visible_gpu() {
         let gpus = vec![
             GpuInfo {
                 index: 0,
@@ -342,12 +346,13 @@ mod tests {
             },
         ];
 
-        let (_, total, free, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::Best);
-        assert_eq!((total, free, indices), (200, 80, vec![1]));
+        let (_, total, fit_capacity, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::Best);
+        // Ollama serves one model at a time, so fit basis is total VRAM
+        assert_eq!((total, fit_capacity, indices), (200, 200, vec![1]));
     }
 
     #[test]
-    fn visible_sum_policy_sums_visible_gpus_only() {
+    fn visible_sum_policy_sums_total_visible_gpus() {
         let gpus = vec![
             GpuInfo {
                 index: 0,
@@ -367,8 +372,8 @@ mod tests {
             },
         ];
 
-        let (_, total, free, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::VisibleSum);
-        assert_eq!((total, free, indices), (100, 50, vec![0]));
+        let (_, total, fit_capacity, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::VisibleSum);
+        assert_eq!((total, fit_capacity, indices), (100, 100, vec![0]));
     }
 
     #[test]
@@ -392,7 +397,7 @@ mod tests {
             },
         ];
 
-        let (_, total, free, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::AllSum);
-        assert_eq!((total, free, indices), (300, 130, vec![0, 1]));
+        let (_, total, fit_capacity, indices) = select_gpu_fit_basis(&gpus, GpuFitPolicy::AllSum);
+        assert_eq!((total, fit_capacity, indices), (300, 300, vec![0, 1]));
     }
 }

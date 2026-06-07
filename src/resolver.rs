@@ -256,6 +256,12 @@ fn evaluate_candidate<R: Registry>(
         Err(ResolverError::ManifestMissing { detail, .. }) => {
             return Ok(CandidateEvaluation::MissingManifest(detail));
         }
+        Err(ResolverError::ManifestCloudOnly { .. }) => {
+            return Ok(CandidateEvaluation::MissingManifest("cloud-only model; no local weights".to_string()));
+        }
+        Err(ResolverError::ManifestPlatformRestricted { status, .. }) => {
+            return Ok(CandidateEvaluation::MissingManifest(format!("platform-restricted (HTTP {status})")));
+        }
         Err(err) => return Err(err),
     };
     let runtime_margin_pct = effective_margin_pct(opts);
@@ -394,23 +400,23 @@ pub fn check_fit(variant: &ModelVariant, hw: &HardwareProfile, opts: &ResolveOpt
     let estimated = variant.estimated_runtime_bytes;
 
     if hw.has_gpu() {
-        if estimated <= hw.vram_free {
+        if estimated <= hw.vram_total {
             return FitResult::FitsVram;
         }
 
-        let combined = hw.vram_free.saturating_add(hw.ram_available);
+        let combined = hw.vram_total.saturating_add(hw.ram_available);
         if opts.allow_split && estimated <= combined {
             let gpu_pct = if estimated == 0 {
                 100.0
             } else {
-                (hw.vram_free as f64 / estimated as f64) * 100.0
+                (hw.vram_total as f64 / estimated as f64) * 100.0
             };
             return FitResult::FitsWithSplit { gpu_pct };
         }
 
         FitResult::DoesNotFit {
             need: estimated,
-            have: if opts.allow_split { combined } else { hw.vram_free },
+            have: if opts.allow_split { combined } else { hw.vram_total },
         }
     } else if estimated <= hw.ram_available {
         FitResult::FitsRamOnly
@@ -422,6 +428,7 @@ pub fn check_fit(variant: &ModelVariant, hw: &HardwareProfile, opts: &ResolveOpt
     }
 }
 
+#[allow(deprecated)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,7 +440,7 @@ mod tests {
         HardwareProfile {
             gpu_name: if vram > 0 { Some("test-gpu".into()) } else { None },
             vram_total: vram,
-            vram_free: vram,
+            vram_free: vram, // deprecated: always equal to vram_total
             ram_total: ram,
             ram_available: ram,
             disk_free: disk,

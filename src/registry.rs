@@ -97,7 +97,8 @@ pub fn list_tags(client: &Client, model: &str) -> Result<Vec<TagInfo>> {
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
-    layers: Vec<Layer>,
+    #[serde(default)]
+    layers: Option<Vec<Layer>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +134,16 @@ pub fn get_manifest_size(client: &Client, model: &str, tag: &str) -> Result<(u64
             detail: format!("registry returned {status}"),
         });
     }
+    if status.as_u16() == 412 {
+        // Platform-restricted model (e.g. "this model requires macOS").
+        // Consume the body to allow connection reuse, then skip this candidate.
+        let _body = resp.text().unwrap_or_default();
+        return Err(ResolverError::ManifestPlatformRestricted {
+            model: model.to_string(),
+            tag: tag.to_string(),
+            status: status.as_u16(),
+        });
+    }
     if !status.is_success() {
         return Err(ResolverError::ManifestUnavailable {
             model: model.to_string(),
@@ -150,11 +161,23 @@ pub fn get_manifest_size(client: &Client, model: &str, tag: &str) -> Result<(u64
 }
 
 fn manifest_sizes(model: &str, tag: &str, manifest: &Manifest) -> Result<(u64, u64)> {
+    let layers = match &manifest.layers {
+        Some(l) => l,
+        None => {
+            // Cloud-only model: registry returned "layers": null.
+            // There are no local weights to estimate or fit.
+            return Err(ResolverError::ManifestCloudOnly {
+                model: model.to_string(),
+                tag: tag.to_string(),
+            });
+        }
+    };
+
     let mut weights_bytes = 0_u64;
     let mut model_layer_count = 0_usize;
     let mut total_bytes = 0_u64;
 
-    for layer in &manifest.layers {
+    for layer in layers {
         if layer.media_type.contains("application/vnd.ollama.image.model") {
             model_layer_count += 1;
             weights_bytes = weights_bytes.checked_add(layer.size).ok_or_else(|| {
@@ -543,22 +566,48 @@ mod tests {
     #[test]
     fn sums_manifest_layers_and_model_layers() {
         let manifest = Manifest {
-            layers: vec![
+            layers: Some(vec![
                 Layer { media_type: "application/vnd.ollama.image.system".into(), size: 10 },
                 Layer { media_type: "application/vnd.ollama.image.model".into(), size: 40 },
                 Layer { media_type: "application/vnd.ollama.image.model".into(), size: 50 },
-            ],
+            ]),
         };
         assert_eq!(manifest_sizes("m", "t", &manifest).unwrap(), (90, 100));
     }
 
     #[test]
+    fn cloud_only_null_layers_becomes_cloud_only_error() {
+        let manifest = Manifest { layers: None };
+        let err = manifest_sizes("m", "t", &manifest).unwrap_err();
+        assert!(matches!(
+            err,
+            ResolverError::ManifestCloudOnly { model, tag }
+                if model == "m" && tag == "t"
+        ));
+    }
+
+    #[test]
+    fn cloud_only_deserializes_from_null_json() {
+        let null_json = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:abc","size":346},"layers":null}"#;
+        let manifest: Manifest = serde_json::from_str(null_json).unwrap();
+        assert!(manifest.layers.is_none());
+    }
+
+    #[test]
+    fn normal_manifest_deserializes_with_some_layers() {
+        let json = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:abc","size":462},"layers":[{"mediaType":"application/vnd.ollama.image.model","digest":"sha256:def","size":23938321664},{"mediaType":"application/vnd.ollama.image.license","digest":"sha256:ghi","size":11357}]}"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        let layers = manifest.layers.unwrap();
+        assert_eq!(layers.len(), 2);
+    }
+
+    #[test]
     fn manifest_size_total_overflow_is_invalid_with_context() {
         let manifest = Manifest {
-            layers: vec![
+            layers: Some(vec![
                 Layer { media_type: "application/vnd.ollama.image.model".into(), size: u64::MAX },
                 Layer { media_type: "application/vnd.ollama.image.system".into(), size: 1 },
-            ],
+            ]),
         };
         let err = manifest_sizes("m", "t", &manifest).unwrap_err();
         assert!(matches!(
@@ -571,10 +620,10 @@ mod tests {
     #[test]
     fn manifest_size_model_layer_overflow_is_invalid_with_context() {
         let manifest = Manifest {
-            layers: vec![
+            layers: Some(vec![
                 Layer { media_type: "application/vnd.ollama.image.model".into(), size: u64::MAX },
                 Layer { media_type: "application/vnd.ollama.image.model".into(), size: 1 },
-            ],
+            ]),
         };
         let err = manifest_sizes("m", "t", &manifest).unwrap_err();
         assert!(matches!(
@@ -587,7 +636,7 @@ mod tests {
     #[test]
     fn missing_model_layer_is_manifest_invalid_with_context() {
         let manifest = Manifest {
-            layers: vec![Layer { media_type: "application/vnd.ollama.image.system".into(), size: 10 }],
+            layers: Some(vec![Layer { media_type: "application/vnd.ollama.image.system".into(), size: 10 }]),
         };
         let err = manifest_sizes("m", "t", &manifest).unwrap_err();
         assert!(matches!(
