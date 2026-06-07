@@ -7,10 +7,14 @@
 ```bash
 ollama-model-resolver search qwen
 ollama-model-resolver search qwen --fit
+ollama-model-resolver search qwen --fit --all
+ollama-model-resolver search qwen --wide
+ollama-model-resolver search qwen --fit --wide
 ollama-model-resolver search qwen --fast
 ollama-model-resolver resolve 'qwen2.5-coder?'
 ollama-model-resolver resolve 'qwen?' --select 2
 ollama-model-resolver resolve 'qwen?' --first
+ollama-model-resolver resolve 'qwen?' --yes
 ollama-model-resolver resolve qwen2.5-coder:14b
 ollama-model-resolver info
 ollama-model-resolver --ollama-host http://remote.example:11434 --allow-remote-ollama info
@@ -19,6 +23,20 @@ ollama-model-resolver --ollama-host http://remote.example:11434 --allow-remote-o
 A trailing `?` asks the resolver to search and choose a variant. Quote model arguments that contain `?` when you can, for example `'qwen2.5-coder?'`, so the shell never treats `?` as a glob. Without `?`, the resolver treats the argument as an exact Ollama model reference and pulls it unchanged.
 
 When search finds no exact model name in normal interactive mode, the resolver presents the top matches and prompts for a selection. In non-interactive normal mode, it fails with remediation instead of attempting an unusable prompt. Use `--select <N>` for a deterministic 1-based candidate choice, `--first` to accept the top search result, or `--fail-on-ambiguous` to make normal mode fail immediately on non-exact search matches. In `--quiet` mode, non-exact matches fail so shell substitution never receives an unapproved model name.
+
+### Search display modes
+
+Default search (`search qwen`) performs a library-only lookup and prints a compact one-line-per-model layout — all 20 results fit on screen without scrolling. Each row shows name, pulls, tags, updated date, and a truncated description.
+
+With `--fit`, search also resolves tags and checks hardware fit. Models whose estimated runtime exceeds available memory (`DoesNotFit`, `InsufficientDisk`) are hidden by default, along with cloud-only and platform-restricted models. Use `--all` to show everything including non-fitting, cloud-only, and platform-restricted models. `--split` is honored: models that fit with a VRAM/RAM split pass `.fits()` and remain visible.
+
+With `--wide`, search uses the full tabular view (bordered table) instead of the compact one-line layout. Works with or without `--fit`.
+
+`--no-fit` and `--fast` are kept for CLI compatibility but are effectively no-ops — library-only search is already the default. They conflict with `--fit` and `--all`.
+
+### Resolve confirmation
+
+When `resolve` selects a variant that does not fit the detected hardware, it shows a warning and prompts for confirmation. Pass `--yes` to skip the prompt and proceed with the pull regardless. In `--quiet` mode, non-fitting variants always fail (no prompt is shown).
 
 ## Resolution policy
 
@@ -32,7 +50,7 @@ The resolver ranks variants by these rules:
 6. If none of those fit, fetch deferred candidates in ranked order so a pessimistic page-size hint cannot hide a fitting model.
 7. Return the first fitting candidate; otherwise report the smallest evaluated non-fitting candidate for the warning / try-anyway prompt unless no manifest can be read.
 
-Use `--max-manifest-lookups <N>` to cap manifest lookups per model resolution when performance matters more than exhaustive fallback checking. The default has no lookup cap, so correctness is favored over speed. `search` is library-only by default and performs one Ollama library request. Use `search --fit` when you want hardware-aware annotation; in that mode, the cap applies separately to each model that receives fit annotation. `search --no-fit` and `search --fast` remain accepted aliases for library-only search.
+Use `--max-manifest-lookups <N>` to cap manifest lookups per model resolution when performance matters more than exhaustive fallback checking. The default has no lookup cap, so correctness is favored over speed. `search` is library-only by default and performs one Ollama library request. Use `search --fit` when you want hardware-aware annotation and filtering; in that mode, the cap applies separately to each model that receives fit annotation. Use `search --fit --all` to annotate without filtering. `search --no-fit` and `search --fast` remain accepted aliases for library-only search.
 
 Global options include `--pull-stall-timeout <SECONDS>` for long model downloads. The default is 300 seconds without receiving any pull stream data. Pulls have no total request deadline, so a download may run for much longer as long as Ollama keeps sending stream events.
 
