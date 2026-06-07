@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_real_ollama() {
+  local dir resolved self
+  self="$(cd "$SCRIPT_DIR" && pwd)/ollama"
+  IFS=: read -r -a path_dirs <<< "${PATH:-}"
+  for dir in "${path_dirs[@]}"; do
+    [[ -n "$dir" ]] || continue
+    [[ -x "$dir/ollama" ]] || continue
+    resolved="$(cd "$dir" && pwd)/ollama"
+    if [[ "$resolved" != "$self" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  printf 'Error: cannot find real ollama binary in PATH\n' >&2
+  return 1
+}
+
+_resolve_model_ref_if_requested() {
+  local value="$1"
+  if [[ "$value" == *'?' ]]; then
+    ollama-model-resolver resolve "$value" --quiet
+  else
+    printf '%s\n' "$value"
+  fi
+}
+
+resolve_model_arg() {
+  RESOLVED_ARGS=()
+  local arg resolved value
+  local model_seen=0
+  local expect_model_value=0
+  local implicit_positional_allowed=1
+  local arg_index=0
+
+  for arg in "$@"; do
+    if (( expect_model_value )); then
+      resolved="$(_resolve_model_ref_if_requested "$arg")"
+      RESOLVED_ARGS+=("$resolved")
+      expect_model_value=0
+      model_seen=1
+      # Once an explicit model value is consumed, never infer another model.
+      implicit_positional_allowed=0
+      arg_index=$((arg_index + 1))
+      continue
+    fi
+
+    if (( ! model_seen )) && [[ "$arg" == "--model" || "$arg" == "-m" ]]; then
+      RESOLVED_ARGS+=("$arg")
+      expect_model_value=1
+      # Explicit model option consumes the next value. Do not also infer a
+      # positional model, regardless of where this option appears.
+      implicit_positional_allowed=0
+      arg_index=$((arg_index + 1))
+      continue
+    fi
+
+    if (( ! model_seen )) && [[ "$arg" == --model=* ]]; then
+      value="${arg#--model=}"
+      resolved="$(_resolve_model_ref_if_requested "$value")"
+      RESOLVED_ARGS+=("--model=$resolved")
+      model_seen=1
+      implicit_positional_allowed=0
+      arg_index=$((arg_index + 1))
+      continue
+    fi
+
+    # Conservative implicit model mode: only the very first launch argument may
+    # be treated as a positional model. If any option appears before the model,
+    # callers must use --model VALUE, --model=VALUE, or -m VALUE. This avoids
+    # resolving option values or prompt text as model refs.
+    if (( ! model_seen && implicit_positional_allowed && arg_index == 0 )) && [[ "$arg" != -* ]]; then
+      resolved="$(_resolve_model_ref_if_requested "$arg")"
+      RESOLVED_ARGS+=("$resolved")
+      model_seen=1
+      implicit_positional_allowed=0
+      arg_index=$((arg_index + 1))
+      continue
+    fi
+
+    RESOLVED_ARGS+=("$arg")
+    # Any first argument that is not resolved as the implicit model closes the
+    # implicit positional model slot. Later positional args may be prompts,
+    # option values, file paths, or model names, and this wrapper cannot safely
+    # distinguish them.
+    if (( arg_index == 0 )); then
+      implicit_positional_allowed=0
+    fi
+    arg_index=$((arg_index + 1))
+  done
+}
+
+case "${1:-}" in
+  search)
+    shift 1
+    exec ollama-model-resolver search "$@"
+    ;;
+  resolve)
+    shift 1
+    exec ollama-model-resolver resolve "$@"
+    ;;
+  resolver-info)
+    shift 1
+    exec ollama-model-resolver info "$@"
+    ;;
+esac
+
+if [[ "${1:-}" != "launch" ]]; then
+  exec "$(_real_ollama)" "$@"
+fi
+
+TOOL="${2:-}"
+shift 2 || true
+resolve_model_arg "$@"
+
+case "$TOOL" in
+  gemini)     exec "$SCRIPT_DIR/launch-gemini" "${RESOLVED_ARGS[@]}" ;;
+  codex)      exec "$SCRIPT_DIR/launch-codex" "${RESOLVED_ARGS[@]}" ;;
+  crush)      exec "$SCRIPT_DIR/launch-crush" "${RESOLVED_ARGS[@]}" ;;
+  deepseek)   exec "$SCRIPT_DIR/launch-deepseek" "${RESOLVED_ARGS[@]}" ;;
+  aider)      exec "$SCRIPT_DIR/launch-aider" "${RESOLVED_ARGS[@]}" ;;
+  nanocoder)  exec "$SCRIPT_DIR/launch-nanocoder" "${RESOLVED_ARGS[@]}" ;;
+  *)          exec "$(_real_ollama)" launch "$TOOL" "${RESOLVED_ARGS[@]}" ;;
+esac

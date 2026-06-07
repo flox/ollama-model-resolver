@@ -1,0 +1,13 @@
+[install]
+rustc.pkg-path = "rustc"
+cargo.pkg-path = "cargo"
+rust-analyzer.pkg-path = "rust-analyzer"
+pkg-config.pkg-path = "pkg-config"
+
+[vars]
+RUST_BACKTRACE = "1"
+
+[profile]
+common = '''
+  alias omr='ollama-model-resolver'
+'''
