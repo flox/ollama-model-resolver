@@ -51,7 +51,7 @@ pub fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Commands::Search { query, limit, fit, no_fit: _, all } => {
+        Commands::Search { query, limit, fit, no_fit: _, all, wide } => {
             let search_opts = ResolveOpts {
                 fit_filter: fit,
                 all,
@@ -59,9 +59,9 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             if fit {
                 let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
-                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all)
+                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide)
             } else {
-                cmd_search_no_fit(&metadata_client, &query, limit)
+                cmd_search_no_fit(&metadata_client, &query, limit, wide)
             }
         }
         Commands::Resolve {
@@ -124,6 +124,7 @@ fn cmd_search(
     hw: &HardwareProfile,
     opts: &ResolveOpts,
     all: bool,
+    wide: bool,
 ) -> Result<()> {
     // Fetch slightly more than limit to compensate for filtering; most models
     // are downloadable local models, so 5 extra catches the common case where
@@ -169,14 +170,22 @@ fn cmd_search(
 
     rows.truncate(limit);
 
-    display::print_search_results(&rows, hw, cloud_count, platform_count, fit_count);
+    if wide {
+        display::print_search_results(&rows, hw, cloud_count, platform_count, fit_count);
+    } else {
+        display::print_search_results_compact(&rows, hw, cloud_count, platform_count, fit_count);
+    }
     Ok(())
 }
 
-fn cmd_search_no_fit(client: &Client, query: &str, limit: usize) -> Result<()> {
+fn cmd_search_no_fit(client: &Client, query: &str, limit: usize, wide: bool) -> Result<()> {
     let mut results = registry::search_models(client, query)?;
     results.truncate(limit);
-    display::print_search_results_unannotated(&results);
+    if wide {
+        display::print_search_results_unannotated(&results);
+    } else {
+        display::print_search_results_unannotated_compact(&results);
+    }
     Ok(())
 }
 

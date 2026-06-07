@@ -120,6 +120,78 @@ pub fn print_search_results(
     }
 }
 
+pub fn print_search_results_compact(
+    rows: &[AnnotatedSearchResult],
+    hw: &HardwareProfile,
+    cloud_count: u64,
+    platform_count: u64,
+    fit_count: u64,
+) {
+    let hidden_count = cloud_count + platform_count + fit_count;
+
+    print_hardware(hw);
+
+    let header = "  Name                                     Variant            Fit                Weights   Pulls    Tags    Updated        Description";
+    println!("{}", header.dimmed());
+
+    for row in rows {
+        let name = terminal_line(&row.result.name);
+        let mut fields: Vec<String> = Vec::with_capacity(7);
+
+        match (&row.variant, &row.fit) {
+            (Some(variant), Some(fit)) => {
+                fields.push(format!("{:<16}", variant.full_ref));
+                fields.push(format!("{:<18}", fit_summary_compact(fit)));
+                fields.push(ByteSize(variant.weights_bytes).to_string());
+            }
+            _ => {
+                fields.push("-".to_string());
+                let fit_text = match row.filtered {
+                    Some(FilteredReason::CloudOnly) => "cloud-only".dimmed().to_string(),
+                    Some(FilteredReason::PlatformRestricted) => {
+                        "platform-restricted".dimmed().to_string()
+                    }
+                    None => {
+                        let err = row.error.as_deref().unwrap_or("unavailable");
+                        terminal_line(err).dimmed().to_string()
+                    }
+                };
+                fields.push(fit_text);
+                fields.push(row.result.pulls.clone());
+            }
+        }
+
+        fields.push(format!("{:<5}", row.result.tag_count));
+        fields.push(row.result.updated.clone());
+        let desc = truncate(&row.result.description, 48);
+        fields.push(desc);
+
+        println!(
+            "  {:<32} {}",
+            name,
+            fields.join("   ")
+        );
+    }
+
+    if hidden_count > 0 {
+        let mut parts = Vec::new();
+        if cloud_count > 0 {
+            parts.push(format!("{cloud_count} cloud-only"));
+        }
+        if platform_count > 0 {
+            parts.push(format!("{platform_count} platform-restricted"));
+        }
+        if fit_count > 0 {
+            parts.push(format!("{fit_count} does not fit"));
+        }
+        let breakdown = parts.join(", ");
+        println!(
+            "  {} hidden. Use --all to show all models.",
+            breakdown.dimmed()
+        );
+    }
+}
+
 
 pub fn print_search_results_unannotated(results: &[crate::types::SearchResult]) {
     let mut table = Table::new();
@@ -145,6 +217,20 @@ pub fn print_search_results_unannotated(results: &[crate::types::SearchResult]) 
         "Library-only search. Re-run with --fit for hardware-aware tag and manifest annotation.".dimmed()
     );
     println!("{table}");
+}
+
+pub fn print_search_results_unannotated_compact(results: &[crate::types::SearchResult]) {
+    let header = "  Name                                     Pulls           Tags    Updated             Description";
+    println!("{}", header.dimmed());
+
+    for result in results {
+        let name = terminal_line(&result.name);
+        let pulls = terminal_line(&result.pulls);
+        let tags = terminal_line(&result.tag_count);
+        let updated = terminal_line(&result.updated);
+        let desc = truncate(&result.description, 48);
+        println!("  {:<32} {:<13} {:<6} {:<15} {}", name, pulls, tags, updated, desc);
+    }
 }
 
 pub fn print_resolve_result(variant: &ModelVariant, fit: &FitResult, hw: &HardwareProfile) {
@@ -299,6 +385,16 @@ fn fit_summary_colored(fit: &FitResult) -> String {
         FitResult::FitsVram => fit.summary().green().to_string(),
         FitResult::FitsWithSplit { .. } | FitResult::FitsRamOnly => fit.summary().yellow().to_string(),
         FitResult::DoesNotFit { .. } | FitResult::InsufficientDisk { .. } => fit.summary().red().to_string(),
+    }
+}
+
+fn fit_summary_compact(fit: &FitResult) -> String {
+    match fit {
+        FitResult::FitsVram => "✓ fits GPU".green().to_string(),
+        FitResult::FitsWithSplit { gpu_pct } => format!("~ {} GPU", gpu_pct).green().to_string(),
+        FitResult::FitsRamOnly => "~ RAM / CPU".yellow().to_string(),
+        FitResult::DoesNotFit { .. } => "✗ does not fit".red().to_string(),
+        FitResult::InsufficientDisk { .. } => "✗ disk short".red().to_string(),
     }
 }
 

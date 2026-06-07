@@ -68,6 +68,10 @@ pub enum Commands {
         /// Compatibility flag for library-only search. Library-only is now the default.
         #[arg(long = "no-fit", visible_alias = "fast", conflicts_with = "fit")]
         no_fit: bool,
+
+        /// Show results in a tabular format instead of the compact one-line-per-model layout.
+        #[arg(long)]
+        wide: bool,
     },
 
     /// Resolve a model ending in '?' or pull an exact model reference.
@@ -238,6 +242,24 @@ mod tests {
         match cli.command {
             Commands::Search { all, .. } => {
                 assert!(!all);
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_wide_flag() {
+        let cli = Cli::try_parse_from([
+            "ollama-model-resolver",
+            "search",
+            "qwen",
+            "--wide",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Search { wide, .. } => {
+                assert!(wide);
             }
             _ => panic!("expected search command"),
         }
