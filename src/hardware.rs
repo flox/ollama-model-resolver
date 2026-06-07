@@ -14,10 +14,16 @@ pub fn detect_with_policy(
     gpu_fit_policy: GpuFitPolicy,
 ) -> Result<HardwareProfile> {
     let models_dir = models_dir.unwrap_or_else(default_models_dir);
+    let unified = detect_unified_mem();
     let gpus = detect_gpus();
     let cuda_visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
-    let (gpu_name, vram_total, vram_free, selected_gpu_indices) =
-        select_gpu_fit_basis(&gpus, gpu_fit_policy);
+
+    let (gpu_name, vram_total, vram_free, selected_gpu_indices) = if let Some((total, free)) = unified {
+        select_unified_fit_basis(total, free)
+    } else {
+        select_gpu_fit_basis(&gpus, gpu_fit_policy)
+    };
+
     let (ram_total, ram_available) = detect_ram()?;
     let disk_free = detect_disk(&models_dir)?;
 
@@ -33,6 +39,8 @@ pub fn detect_with_policy(
         selected_gpu_indices,
         cuda_visible_devices,
         gpu_fit_policy,
+        unified_mem_total: unified.map_or(0, |(t, _)| t),
+        unified_mem_free: unified.map_or(0, |(_, f)| f),
     })
 }
 
@@ -243,10 +251,18 @@ fn detect_ram() -> Result<(u64, u64)> {
     Ok((total.saturating_mul(1024), available.saturating_mul(1024)))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn detect_ram() -> Result<(u64, u64)> {
+    let unified = detect_unified_mem().unwrap_or((0, 0));
+    let ram_available = darwin_free_ram_bytes().unwrap_or(0);
+    // ram_total = unified total (hw.memsize), ram_available from vm_statistics
+    Ok((unified.0, ram_available))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn detect_ram() -> Result<(u64, u64)> {
     Err(ResolverError::RamDetection(
-        "only Linux /proc/meminfo RAM detection is implemented in v0.1.0".into(),
+        "RAM detection is not implemented on this platform".into(),
     ))
 }
 
@@ -287,6 +303,113 @@ fn existing_ancestor(path: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Select GPU fit basis from Apple Silicon unified memory.
+fn select_unified_fit_basis(total: u64, free: u64) -> (Option<String>, u64, u64, Vec<u32>) {
+    (
+        Some("Apple Silicon (Unified)".into()),
+        total,
+        free,
+        vec![0],
+    )
+}
+
+/// Detect Apple Silicon unified memory via sysctl.
+/// Returns Some((total, free)) on Apple Silicon; None on Intel Macs and Linux.
+#[cfg(target_os = "macos")]
+fn detect_unified_mem() -> Option<(u64, u64)> {
+    // hw.cpufamily = 0x97a2f6cf identifies Apple Silicon (A/M series SoCs).
+    // NOTE: T2 Intel Macs (2018-2019 MacBook Pro) also report this cpufamily.
+    // On those machines the iGPU shares system RAM, so this label is slightly
+    // inaccurate — but the memory value is still correct and the model fits.
+    let cpufamily = sysctl_value("hw.cpufamily")?;
+    if cpufamily != 0x97a2f6cf {
+        return None;
+    }
+    let total = sysctl_value("hw.memsize")?;
+    let free = darwin_free_ram_bytes().unwrap_or(0);
+    Some((total, free))
+}
+
+/// Non-macos stub: no unified memory.
+#[cfg(not(target_os = "macos"))]
+fn detect_unified_mem() -> Option<(u64, u64)> {
+    None
+}
+
+/// Read a u64 sysctl value by name.
+#[cfg(target_os = "macos")]
+fn sysctl_value(name: &str) -> Option<u64> {
+    use std::ffi::CString;
+    let c = CString::new(name).ok()?;
+    let mut len: usize = 0;
+    unsafe {
+        libc::sysctlbyname(
+            c.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        )
+    }
+    .ok()?;
+    let mut buf = vec![0u8; len];
+    unsafe {
+        libc::sysctlbyname(
+            c.as_ptr(),
+            buf.as_mut_ptr() as *mut _,
+            &mut len,
+            std::ptr::null(),
+            0,
+        )
+    }
+    .ok()?;
+    if buf.len() >= 8 {
+        u64::from_ne_bytes(buf[..8].try_into().ok()?)
+    } else {
+        None
+    }
+}
+
+/// Get free RAM on darwin via vm_statistics_page_count.
+/// Returns (free_bytes, unified_total) or None on failure.
+///
+/// This is the darwin equivalent of Linux's /proc/meminfo MemAvailable:
+/// free pages (no active mapping) × page size.
+#[cfg(target_os = "macos")]
+fn darwin_free_ram_bytes() -> Option<u64> {
+    use std::mem;
+
+    // host_page_size returns the page size in bytes.
+    let page_size = unsafe { libc::host_page_size() as u64 };
+    if page_size == 0 {
+        return None;
+    }
+
+    // host_statistics64 with HOST_VM_INFO64 retrieves vm_statistics64_data_t.
+    let mut vm_stat: libc::vm_statistics64_data_t = unsafe { mem::zeroed() };
+    let mut count: libc::mach_msg_type_number_t = 0;
+    count = (mem::size_of::<libc::vm_statistics64_data_t>() / mem::size_of::<i32>()) as libc::mach_msg_type_number_t;
+
+    let host = unsafe { libc::mach_host_self() };
+    let ret = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64 as i32,
+            &mut vm_stat as *mut libc::vm_statistics64_data_t as *mut libc::integer_t,
+            &mut count,
+        )
+    };
+
+    // KERN_SUCCESS == 0 on darwin
+    if ret != 0 {
+        return None;
+    }
+
+    // free pages with no active mapping
+    let free_pages = vm_stat.free_count as u64;
+    Some(free_pages.saturating_mul(page_size))
 }
 
 #[allow(deprecated)]

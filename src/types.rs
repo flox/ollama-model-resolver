@@ -50,6 +50,10 @@ pub struct HardwareProfile {
     pub selected_gpu_indices: Vec<u32>,
     pub cuda_visible_devices: Option<String>,
     pub gpu_fit_policy: GpuFitPolicy,
+    /// Apple Silicon unified memory total (bytes). Zero on non-darwin platforms.
+    pub unified_mem_total: u64,
+    /// Apple Silicon unified memory free (bytes). Zero on non-darwin platforms.
+    pub unified_mem_free: u64,
 }
 
 impl HardwareProfile {
@@ -85,6 +89,10 @@ impl HardwareProfile {
                 return "system RAM (CPU-only; no NVIDIA GPU detected)".to_string();
             }
             return "system RAM (no CUDA-visible NVIDIA GPU selected)".to_string();
+        }
+
+        if self.unified_mem_total > 0 {
+            return "Apple Silicon unified memory".to_string();
         }
 
         match self.gpu_fit_policy {

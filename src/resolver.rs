@@ -408,7 +408,13 @@ pub fn check_fit(variant: &ModelVariant, hw: &HardwareProfile, opts: &ResolveOpt
             return FitResult::FitsVram;
         }
 
-        let combined = hw.vram_total.saturating_add(hw.ram_available);
+        let combined = if hw.unified_mem_total > 0 {
+            // darwin: vram_total and ram_available are the same unified pool.
+            // Don't add them together — that would double-count.
+            hw.vram_total
+        } else {
+            hw.vram_total.saturating_add(hw.ram_available)
+        };
         if opts.allow_split && estimated <= combined {
             let gpu_pct = if estimated == 0 {
                 100.0
@@ -453,6 +459,8 @@ mod tests {
             selected_gpu_indices: if vram > 0 { vec![0] } else { Vec::new() },
             cuda_visible_devices: None,
             gpu_fit_policy: crate::types::GpuFitPolicy::Best,
+            unified_mem_total: 0,
+            unified_mem_free: 0,
         }
     }
 
