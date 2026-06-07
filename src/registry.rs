@@ -66,8 +66,22 @@ pub fn search_models(client: &Client, query: &str) -> Result<Vec<SearchResult>> 
     Ok(results)
 }
 
+fn ollama_model_path(model: &str) -> String {
+    if model.contains('/') {
+        // Community model: odytrice/qwen3.6 → /odytrice/qwen3.6
+        model
+            .split('/')
+            .map(urlencoded_path_component)
+            .collect::<Vec<_>>()
+            .join("/")
+    } else {
+        // Official model: qwen3 → /library/qwen3
+        format!("library/{}", urlencoded_path_component(model))
+    }
+}
+
 pub fn list_tags(client: &Client, model: &str) -> Result<Vec<TagInfo>> {
-    let url = format!("{OLLAMA_BASE}/library/{}/tags", urlencoded_path_component(model));
+    let url = format!("{OLLAMA_BASE}/{}/tags", ollama_model_path(model));
     let html = fetch_html(client, &url)?;
     let mut tags = parse_tags_html(model, &html);
 
@@ -334,9 +348,18 @@ fn library_href_rest(href: &str) -> Option<&str> {
 }
 
 fn tag_from_library_href(model: &str, href: &str) -> Option<String> {
-    let rest = library_href_rest(href)?;
     let tag_prefix = format!("{model}:");
-    let rest = rest.strip_prefix(&tag_prefix)?;
+
+    // Try /library/<model>:<tag> for official models
+    let rest = if let Some(rest) = library_href_rest(href) {
+        rest.strip_prefix(&tag_prefix)?
+    } else {
+        // Try /<user>/<model>:<tag> for community models (no /library/ prefix)
+        let href = href.trim();
+        let stripped = href.strip_prefix('/')?;
+        stripped.strip_prefix(&tag_prefix)?
+    };
+
     let tag = rest.split(['?', '#']).next()?.trim_matches('/');
 
     if tag.is_empty()
