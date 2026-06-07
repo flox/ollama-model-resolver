@@ -143,6 +143,7 @@ pub fn print_search_results_compact(
                 fields.push(format!("{:<16}", variant.full_ref));
                 fields.push(format!("{:<18}", fit_summary_compact(fit)));
                 fields.push(ByteSize(variant.weights_bytes).to_string());
+                fields.push(row.result.pulls.clone());
             }
             _ => {
                 fields.push("-".to_string());
@@ -157,6 +158,7 @@ pub fn print_search_results_compact(
                     }
                 };
                 fields.push(fit_text);
+                fields.push("-".to_string());
                 fields.push(row.result.pulls.clone());
             }
         }
@@ -391,7 +393,7 @@ fn fit_summary_colored(fit: &FitResult) -> String {
 fn fit_summary_compact(fit: &FitResult) -> String {
     match fit {
         FitResult::FitsVram => "✓ fits GPU".green().to_string(),
-        FitResult::FitsWithSplit { gpu_pct } => format!("~ {} GPU", gpu_pct).green().to_string(),
+        FitResult::FitsWithSplit { gpu_pct } => format!("~ {}% GPU", (*gpu_pct) as u32).green().to_string(),
         FitResult::FitsRamOnly => "~ RAM / CPU".yellow().to_string(),
         FitResult::DoesNotFit { .. } => "✗ does not fit".red().to_string(),
         FitResult::InsufficientDisk { .. } => "✗ disk short".red().to_string(),
