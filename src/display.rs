@@ -393,9 +393,15 @@ pub fn print_macos_only_note(rows: &[AnnotatedSearchResult]) {
         .filter(|r| matches!(r.filtered, Some(FilteredReason::PlatformRestricted)))
         .count();
     if count > 0 {
-        let note = format!(
-            "{count} macOS-only model(s): these require macOS to run; size/fit is gated by Ollama and not verified here."
-        );
+        let note = if cfg!(target_os = "macos") {
+            format!(
+                "{count} macOS-only model(s): size/fit not verified — the local Ollama daemon checks at pull."
+            )
+        } else {
+            format!(
+                "{count} macOS-only model(s): require macOS and cannot run on this host."
+            )
+        };
         println!("  {}", note.dimmed());
     }
 }

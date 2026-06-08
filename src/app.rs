@@ -193,16 +193,17 @@ fn cmd_search(
 /// gates to macOS (every candidate tag is platform-restricted, HTTP 412).
 /// Everything else is dropped. This works on any host.
 ///
-/// Otherwise (the default):
+/// `--all` keeps everything on any host (it means "show all"). Otherwise (the
+/// default view):
 /// - macOS host: macOS-only models are first-class results, kept in relevance
 ///   order alongside runnable ones.
-/// - Linux host: macOS-only models are hidden entirely (they can't run there);
-///   only `--macos` surfaces them. `--all` does NOT reveal them.
+/// - Linux host: macOS-only models are hidden (they can't run there); reach them
+///   with `--all` (everything) or `--macos` (only macOS-only).
 /// - cloud-only is hidden (no local weights) and non-fitting is hidden under
-///   `--fit`, unless `--all`.
+///   `--fit`.
 ///
 /// Returns `(cloud_hidden, platform_hidden, fit_hidden)`. `platform_hidden` is
-/// non-zero only on Linux, where macOS-only models are hidden.
+/// non-zero only in the default view on Linux, where macOS-only models are hidden.
 fn filter_search_rows(
     rows: &mut Vec<AnnotatedSearchResult>,
     fit_filter: bool,
@@ -220,19 +221,18 @@ fn filter_search_rows(
     let mut fit = 0u64;
 
     rows.retain(|row| {
-        // macOS-only models: first-class results on macOS, but never shown on
-        // Linux in default/`--all` views (they can't run there) — only `--macos`
-        // surfaces them on Linux.
+        // --all means "show all" — keep everything, on any host.
+        if all {
+            return true;
+        }
+        // macOS-only models: first-class on macOS, hidden in the default view on
+        // Linux (they can't run there; --all or --macos surfaces them).
         if matches!(row.filtered, Some(FilteredReason::PlatformRestricted)) {
             if macos_host {
                 return true;
             }
             platform += 1;
             return false;
-        }
-        // `--all` keeps the remaining categories (cloud-only, non-fitting).
-        if all {
-            return true;
         }
         if matches!(row.filtered, Some(FilteredReason::CloudOnly)) {
             cloud += 1;
@@ -878,19 +878,17 @@ mod tests {
     }
 
     #[test]
-    fn linux_host_all_still_hides_macos_only() {
+    fn linux_host_all_shows_everything_including_macos_only() {
         use crate::types::FitResult;
         let mut rows = vec![
             annotated_row("mac-only", Some(FilteredReason::PlatformRestricted), None),
             annotated_row("cloud", Some(FilteredReason::CloudOnly), None),
             annotated_row("fits", None, Some(FitResult::FitsVram)),
         ];
-        // --all reveals cloud-only / non-fitting, but NOT macOS-only on Linux.
+        // --all means "all": on Linux too, it reveals macOS-only models.
         let counts = filter_search_rows(&mut rows, true, true, false, /* macos_host */ false);
-        assert_eq!(counts, (0, 1, 0));
-        let mut kept = names(&rows);
-        kept.sort();
-        assert_eq!(kept, vec!["cloud", "fits"]);
+        assert_eq!(counts, (0, 0, 0));
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
