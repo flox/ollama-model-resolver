@@ -71,6 +71,14 @@ pub fn resolve_with_registry_diagnostics<R: Registry>(
     let plan = manifest_evaluation_plan(&candidates, hw, opts);
     let mut diagnostics = diagnostics_from_plan(&candidates, &plan);
     let mut smallest_evaluated: Option<(ModelVariant, FitResult)> = None;
+    // Highest-ranked candidate that the registry gated behind a platform
+    // precondition (HTTP 412, "requires macOS"). Used to report a macOS-only
+    // model when no sizable variant exists, so search can surface it on macOS.
+    let mut platform_restricted: Option<(String, u16)> = None;
+    // Highest-ranked candidate that is cloud-only (no local weights). Used to
+    // report a cloud-only model when no sizable variant exists, so search can
+    // hide it cleanly instead of leaking a generic "no usable manifest" error.
+    let mut cloud_only: Option<String> = None;
     let mut manifest_lookups = 0_usize;
 
     for candidate_index in plan.primary {
@@ -113,6 +121,24 @@ pub fn resolve_with_registry_diagnostics<R: Registry>(
                 }
 
                 record_smallest_nonfit(&mut smallest_evaluated, variant, fit);
+            }
+            CandidateEvaluation::PlatformRestricted(status) => {
+                if platform_restricted.is_none() {
+                    platform_restricted = Some((tag_info.tag.clone(), status));
+                }
+                diagnostics.manifest_checked.push(candidate_trace(
+                    tag_info,
+                    format!("platform-restricted (HTTP {status}); requires macOS"),
+                ));
+            }
+            CandidateEvaluation::CloudOnly => {
+                if cloud_only.is_none() {
+                    cloud_only = Some(tag_info.tag.clone());
+                }
+                diagnostics.manifest_checked.push(candidate_trace(
+                    tag_info,
+                    "cloud-only model; no local weights".to_string(),
+                ));
             }
         }
     }
@@ -162,19 +188,60 @@ pub fn resolve_with_registry_diagnostics<R: Registry>(
 
                 record_smallest_nonfit(&mut smallest_evaluated, variant, fit);
             }
+            CandidateEvaluation::PlatformRestricted(status) => {
+                if platform_restricted.is_none() {
+                    platform_restricted = Some((tag_info.tag.clone(), status));
+                }
+                diagnostics.manifest_checked.push(candidate_trace(
+                    tag_info,
+                    format!("platform-restricted (HTTP {status}); requires macOS"),
+                ));
+            }
+            CandidateEvaluation::CloudOnly => {
+                if cloud_only.is_none() {
+                    cloud_only = Some(tag_info.tag.clone());
+                }
+                diagnostics.manifest_checked.push(candidate_trace(
+                    tag_info,
+                    "cloud-only model; no local weights".to_string(),
+                ));
+            }
         }
     }
 
-    smallest_evaluated
-        .map(|(variant, fit)| ResolutionOutcome {
+    // A sized-but-non-fitting variant is a more specific verdict than
+    // platform-restriction, so it takes precedence in the fallback ordering.
+    if let Some((variant, fit)) = smallest_evaluated {
+        return Ok(ResolutionOutcome {
             variant,
             fit,
-            diagnostics: diagnostics.clone(),
-        })
-        .ok_or_else(|| ResolverError::NoUsableManifest {
+            diagnostics,
+        });
+    }
+
+    // No variant was sizable. Report the most actionable reason distinctly so
+    // search can classify the model rather than leaking a generic unusable
+    // manifest. Platform-restricted (locally runnable on macOS) takes precedence
+    // over cloud-only (never runnable locally).
+    if let Some((tag, status)) = platform_restricted {
+        return Err(ResolverError::ManifestPlatformRestricted {
             model: model.to_string(),
-            attempts: manifest_failure_summary(&diagnostics),
-        })
+            tag,
+            status,
+        });
+    }
+
+    if let Some(tag) = cloud_only {
+        return Err(ResolverError::ManifestCloudOnly {
+            model: model.to_string(),
+            tag,
+        });
+    }
+
+    Err(ResolverError::NoUsableManifest {
+        model: model.to_string(),
+        attempts: manifest_failure_summary(&diagnostics),
+    })
 }
 
 fn manifest_failure_summary(diagnostics: &ResolutionDiagnostics) -> String {
@@ -223,6 +290,11 @@ fn candidate_trace(tag_info: &TagInfo, decision: impl Into<String>) -> Candidate
 enum CandidateEvaluation {
     Evaluated(ModelVariant, FitResult),
     MissingManifest(String),
+    /// Registry gated this candidate behind a platform precondition (HTTP 412,
+    /// "requires macOS"). Carries the status for diagnostics.
+    PlatformRestricted(u16),
+    /// Candidate is cloud-only (manifest has no local weight layers).
+    CloudOnly,
 }
 
 fn maybe_evaluate_candidate<R: Registry>(
@@ -261,10 +333,10 @@ fn evaluate_candidate<R: Registry>(
             return Ok(CandidateEvaluation::MissingManifest(detail));
         }
         Err(ResolverError::ManifestCloudOnly { .. }) => {
-            return Ok(CandidateEvaluation::MissingManifest("cloud-only model; no local weights".to_string()));
+            return Ok(CandidateEvaluation::CloudOnly);
         }
         Err(ResolverError::ManifestPlatformRestricted { status, .. }) => {
-            return Ok(CandidateEvaluation::MissingManifest(format!("platform-restricted (HTTP {status})")));
+            return Ok(CandidateEvaluation::PlatformRestricted(status));
         }
         Err(err) => return Err(err),
     };
@@ -549,6 +621,22 @@ mod tests {
                     detail: detail.clone(),
                 });
             }
+            // Mirror the real registry: nvfp4 quant tags are macOS-only and
+            // return HTTP 412 ("requires macOS").
+            if tag.contains("nvfp4") {
+                return Err(ResolverError::ManifestPlatformRestricted {
+                    model: model.to_string(),
+                    tag: tag.to_string(),
+                    status: 412,
+                });
+            }
+            // Mirror the real registry: cloud-only tags have no local weights.
+            if tag.contains("cloud") {
+                return Err(ResolverError::ManifestCloudOnly {
+                    model: model.to_string(),
+                    tag: tag.to_string(),
+                });
+            }
             self.manifests.get(tag).copied().ok_or_else(|| ResolverError::ManifestMissing {
                 model: model.to_string(),
                 tag: tag.to_string(),
@@ -734,6 +822,126 @@ mod tests {
             registry.manifest_calls,
             vec!["70b-q4_K_M", "32b-q4_K_M", "14b-q4_K_M"]
         );
+    }
+
+    #[test]
+    fn all_platform_restricted_candidates_report_platform_restricted() {
+        // A model published only as macOS-only nvfp4 quants: every manifest 412s.
+        let mut registry = FakeRegistry {
+            tags: vec![tag("9b-nvfp4", None), tag("35b-a3b-nvfp4", None)],
+            manifests: HashMap::new(),
+            fatal_manifest_errors: HashMap::new(),
+            manifest_calls: Vec::new(),
+        };
+
+        let err = resolve_with_registry(
+            &mut registry,
+            "qwen3.5",
+            &hw(0, 64_000_000_000, 100_000_000_000),
+            &opts(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ResolverError::ManifestPlatformRestricted { .. }),
+            "expected ManifestPlatformRestricted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn platform_restricted_candidate_ignored_when_a_variant_fits() {
+        // A normal tag that fits wins; the macOS-only nvfp4 tag is never reached.
+        let mut registry = FakeRegistry {
+            tags: vec![tag("9b-nvfp4", None), tag("7b", None)],
+            manifests: HashMap::from([("7b".into(), (4_000_000_000, 4_000_000_000))]),
+            fatal_manifest_errors: HashMap::new(),
+            manifest_calls: Vec::new(),
+        };
+
+        let (variant, fit) = resolve_with_registry(
+            &mut registry,
+            "m",
+            &hw(12_000_000_000, 64_000_000_000, 100_000_000_000),
+            &opts(),
+        )
+        .unwrap();
+
+        // A fitting variant is selected despite a 412 macOS-only candidate in
+        // the tag list (regardless of which is probed first).
+        assert_eq!(variant.tag, "7b");
+        assert!(fit.fits());
+    }
+
+    #[test]
+    fn all_cloud_only_candidates_report_cloud_only() {
+        let mut registry = FakeRegistry {
+            tags: vec![tag("cloud", None), tag("cloud-large", None)],
+            manifests: HashMap::new(),
+            fatal_manifest_errors: HashMap::new(),
+            manifest_calls: Vec::new(),
+        };
+
+        let err = resolve_with_registry(
+            &mut registry,
+            "m",
+            &hw(0, 64_000_000_000, 100_000_000_000),
+            &opts(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ResolverError::ManifestCloudOnly { .. }),
+            "expected ManifestCloudOnly, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn platform_restricted_takes_precedence_over_cloud_only() {
+        // A model with both a cloud-only tag and a macOS-only tag (no sizable
+        // variant) is reported as macOS-only — it is at least locally runnable
+        // on macOS, unlike cloud-only.
+        let mut registry = FakeRegistry {
+            tags: vec![tag("cloud", None), tag("9b-nvfp4", None)],
+            manifests: HashMap::new(),
+            fatal_manifest_errors: HashMap::new(),
+            manifest_calls: Vec::new(),
+        };
+
+        let err = resolve_with_registry(
+            &mut registry,
+            "m",
+            &hw(0, 64_000_000_000, 100_000_000_000),
+            &opts(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ResolverError::ManifestPlatformRestricted { .. }),
+            "expected ManifestPlatformRestricted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sized_non_fitting_variant_takes_precedence_over_platform_restricted() {
+        // A sized-but-too-big tag is a more specific verdict than 412, so the
+        // resolver reports DoesNotFit rather than platform-restricted.
+        let mut registry = FakeRegistry {
+            tags: vec![tag("9b-nvfp4", None), tag("70b", None)],
+            manifests: HashMap::from([("70b".into(), (40_000_000_000, 40_000_000_000))]),
+            fatal_manifest_errors: HashMap::new(),
+            manifest_calls: Vec::new(),
+        };
+
+        let (variant, fit) = resolve_with_registry(
+            &mut registry,
+            "m",
+            &hw(8_000_000_000, 64_000_000_000, 100_000_000_000),
+            &opts(),
+        )
+        .unwrap();
+
+        assert_eq!(variant.tag, "70b");
+        assert!(!fit.fits());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # ollama-model-resolver
 
-`ollama-model-resolver` is a Linux-first Rust CLI for selecting and pulling an Ollama model variant that is likely to fit the detected machine. It searches the Ollama library, reads tag manifests from the Ollama registry, estimates runtime memory from model weights plus a configurable margin, checks disk space, and pulls the selected `model:tag` through the local Ollama API.
+`ollama-model-resolver` is a Rust CLI for selecting and pulling an Ollama model variant that is likely to fit the detected machine. It runs on Linux (NVIDIA VRAM) and macOS (Apple Silicon unified memory). It searches the Ollama library, reads tag manifests from the Ollama registry, estimates runtime memory from model weights plus a configurable margin, checks disk space, and pulls the selected `model:tag` through the local Ollama API.
 
 ## Commands
 
@@ -11,6 +11,7 @@ ollama-model-resolver search qwen --fit --all
 ollama-model-resolver search qwen --wide
 ollama-model-resolver search qwen --fit --wide
 ollama-model-resolver search qwen --fast
+ollama-model-resolver search qwen --macos
 ollama-model-resolver resolve 'qwen2.5-coder?'
 ollama-model-resolver resolve 'qwen?' --select 2
 ollama-model-resolver resolve 'qwen?' --first
@@ -28,7 +29,11 @@ When search finds no exact model name in normal interactive mode, the resolver p
 
 Default search (`search qwen`) performs a library-only lookup and prints a compact one-line-per-model layout — all 20 results fit on screen without scrolling. Each row shows name, pulls, tags, updated date, and a truncated description.
 
-With `--fit`, search also resolves tags and checks hardware fit. Models whose estimated runtime exceeds available memory (`DoesNotFit`, `InsufficientDisk`) are hidden by default, along with cloud-only and platform-restricted models. Use `--all` to show everything including non-fitting, cloud-only, and platform-restricted models. `--split` is honored: models that fit with a VRAM/RAM split pass `.fits()` and remain visible.
+With `--fit`, search also resolves tags and checks hardware fit. Models whose estimated runtime exceeds available memory (`DoesNotFit`, `InsufficientDisk`) are hidden by default, along with cloud-only models that have no local weights. Use `--all` to show everything, including non-fitting and cloud-only models. `--split` is honored: models that fit with a VRAM/RAM split pass `.fits()` and remain visible.
+
+macOS-only models — those the Ollama registry gates to macOS (for example `nvfp4` quantizations, which return HTTP 412 "this model requires macOS") — are **surfaced**, not hidden. Their manifests are gated so the resolver cannot size them, so they appear labeled `macOS-only`, listed after the models verified to fit, with a note that the local Ollama daemon checks fit at pull time. A model counts as macOS-only only when every candidate tag is gated; a model that also offers a normal runnable tag resolves to that tag instead.
+
+With `--macos`, search shows **only** macOS-only models and filters everything else out. This works on any host OS (the gate is detected from the registry, not the local platform), so it is also a way to discover macOS-only models from Linux. `--macos` implies hardware annotation and conflicts with `--all` and `--no-fit`.
 
 With `--wide`, search uses the full tabular view (bordered table) instead of the compact one-line layout. Works with or without `--fit`.
 
@@ -99,7 +104,8 @@ The tool pulls through `POST /api/pull` with `stream=true`, so `--ollama-host` a
 - `resolve --fail-on-ambiguous` fails immediately when search has no exact model match.
 - `--split` allows the selected GPU VRAM basis plus system RAM for fit estimates.
 - If no visible NVIDIA GPU is selected, the tool uses CPU/RAM fit checks and prints that basis in the hardware summary.
-- RAM detection uses `/proc/meminfo` and targets Linux for v0.1.0.
+- On Apple Silicon (`macOS`), the fit basis is the unified memory pool: VRAM and system RAM are one physical pool, so `--split` does not apply and is a no-op (the tool prints a note). Fit is checked against memory available right now, so the verdict tracks current system load.
+- RAM detection uses `/proc/meminfo` on Linux. On macOS it uses `hw.memsize` for the total and `host_statistics64` (total minus wired and compressed pages) for available memory, mirroring the system's own "memory free" notion.
 - Disk checks use `statvfs` against `$OLLAMA_MODELS` or `~/.ollama/models`.
 
 ## Scraping and registry access

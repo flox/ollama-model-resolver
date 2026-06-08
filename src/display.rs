@@ -78,9 +78,7 @@ pub fn print_search_results(
             _ => {
                 let fit_text = match row.filtered {
                     Some(FilteredReason::CloudOnly) => "cloud-only".dimmed().to_string(),
-                    Some(FilteredReason::PlatformRestricted) => {
-                        "platform-restricted".dimmed().to_string()
-                    }
+                    Some(FilteredReason::PlatformRestricted) => platform_restricted_cell(),
                     None => {
                         let err = row.error.as_deref().unwrap_or("unavailable");
                         terminal_line(err).dimmed().to_string()
@@ -152,9 +150,7 @@ pub fn print_search_results_compact(
                 fields.push("-".to_string());
                 let fit_text = match row.filtered {
                     Some(FilteredReason::CloudOnly) => "cloud-only".dimmed().to_string(),
-                    Some(FilteredReason::PlatformRestricted) => {
-                        "platform-restricted".dimmed().to_string()
-                    }
+                    Some(FilteredReason::PlatformRestricted) => platform_restricted_cell(),
                     None => {
                         let err = row.error.as_deref().unwrap_or("unavailable");
                         terminal_line(err).dimmed().to_string()
@@ -390,6 +386,28 @@ fn fit_summary_colored(fit: &FitResult) -> String {
         FitResult::FitsVram => fit.summary().green().to_string(),
         FitResult::FitsWithSplit { .. } | FitResult::FitsRamOnly => fit.summary().yellow().to_string(),
         FitResult::DoesNotFit { .. } | FitResult::InsufficientDisk { .. } => fit.summary().red().to_string(),
+    }
+}
+
+/// Fit cell for a macOS-only model — one the registry gates to macOS (HTTP 412).
+/// The manifest is gated, so size/fit is unknown; the label is the same on any
+/// host OS (the model requires macOS regardless of where we're running).
+fn platform_restricted_cell() -> String {
+    "macOS-only".cyan().to_string()
+}
+
+/// Print a one-line note when macOS-only models are shown, explaining the
+/// unverified fit. Platform-independent.
+pub fn print_macos_only_note(rows: &[AnnotatedSearchResult]) {
+    let count = rows
+        .iter()
+        .filter(|r| matches!(r.filtered, Some(FilteredReason::PlatformRestricted)))
+        .count();
+    if count > 0 {
+        let note = format!(
+            "{count} macOS-only model(s): these require macOS to run; size/fit is gated by Ollama and not verified here."
+        );
+        println!("  {}", note.dimmed());
     }
 }
 

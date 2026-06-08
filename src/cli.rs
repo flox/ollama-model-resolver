@@ -72,6 +72,10 @@ pub enum Commands {
         /// Show results in a tabular format instead of the compact one-line-per-model layout.
         #[arg(long)]
         wide: bool,
+
+        /// Show only macOS-optimized models (those the registry gates to macOS). Implies hardware annotation; works on any host OS.
+        #[arg(long, conflicts_with_all = ["no_fit", "all"])]
+        macos: bool,
     },
 
     /// Resolve a model ending in '?' or pull an exact model reference.
@@ -263,6 +267,21 @@ mod tests {
             }
             _ => panic!("expected search command"),
         }
+    }
+
+    #[test]
+    fn parses_macos_flag() {
+        let cli = Cli::try_parse_from(["ollama-model-resolver", "search", "qwen", "--macos"]).unwrap();
+        match cli.command {
+            Commands::Search { macos, .. } => assert!(macos),
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn macos_conflicts_with_all_and_no_fit() {
+        assert!(Cli::try_parse_from(["ollama-model-resolver", "search", "q", "--macos", "--all"]).is_err());
+        assert!(Cli::try_parse_from(["ollama-model-resolver", "search", "q", "--macos", "--no-fit"]).is_err());
     }
 
     #[test]

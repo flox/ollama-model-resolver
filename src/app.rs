@@ -51,16 +51,19 @@ pub fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Commands::Search { query, limit, fit, no_fit: _, all, wide } => {
+        Commands::Search { query, limit, fit, no_fit: _, all, wide, macos } => {
+            // --macos needs manifest annotation to detect the registry's macOS
+            // gate, so it implies the hardware-aware (fit) search path.
+            let want_fit = fit || macos;
             let search_opts = ResolveOpts {
-                fit_filter: fit,
+                fit_filter: want_fit,
                 all,
                 ..opts
             };
-            if fit {
+            if want_fit {
                 let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
                 warn_if_split_ignored(&hw, cli.allow_split);
-                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide)
+                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide, macos)
             } else {
                 cmd_search_no_fit(&metadata_client, &query, limit, wide)
             }
@@ -130,6 +133,7 @@ fn pull_client(_pull_stall_timeout: Duration) -> Result<Client> {
         .map_err(ResolverError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     client: &Client,
     query: &str,
@@ -138,6 +142,7 @@ fn cmd_search(
     opts: &ResolveOpts,
     all: bool,
     wide: bool,
+    macos_only: bool,
 ) -> Result<()> {
     // Fetch slightly more than limit to compensate for filtering; most models
     // are downloadable local models, so 5 extra catches the common case where
@@ -152,23 +157,69 @@ fn cmd_search(
         .map(|result| annotate_search_result(&mut registry_client, result, hw, opts))
         .collect();
 
-    // Filter out cloud-only, platform-restricted, and non-fitting models unless --all.
-    let (cloud_count, platform_count, fit_count) = if all {
-        (0, 0, 0)
+    let (cloud_count, platform_count, fit_count) =
+        filter_search_rows(&mut rows, opts.fit_filter, all, macos_only);
+
+    truncate_rows(&mut rows, limit, macos_only);
+
+    if macos_only && rows.is_empty() {
+        display::print_hardware(hw);
+        println!(
+            "No macOS-only models found for '{}'. These are models the registry gates to macOS (every tag requires macOS).",
+            terminal_line(query)
+        );
+        return Ok(());
+    }
+
+    if wide {
+        display::print_search_results(&rows, hw, cloud_count, platform_count, fit_count);
     } else {
-        let mut cloud = 0u64;
-        let mut platform = 0u64;
-        let mut fit = 0u64;
+        display::print_search_results_compact(&rows, hw, cloud_count, platform_count, fit_count);
+    }
+    display::print_macos_only_note(&rows);
+    Ok(())
+}
+
+/// Filter and order search rows for display.
+///
+/// With `macos_only`, keep ONLY macOS-optimized models — those the registry
+/// gates to macOS, i.e. models whose every candidate tag is platform-restricted
+/// (HTTP 412). Everything else (runnable, cloud-only, non-fitting) is dropped.
+///
+/// Otherwise (the default), surface BOTH runnable models AND macOS-only models:
+/// hide cloud-only (never runnable anywhere) always, and non-fitting under
+/// `--fit`, but KEEP macOS-only models and list them after the verified-fit
+/// ones. `--all` keeps everything. All of this is platform-independent: the
+/// macOS gate is detected from the registry, not the host OS.
+///
+/// Returns `(cloud_hidden, platform_hidden, fit_hidden)` for the breakdown line.
+/// `platform_hidden` is always 0 — macOS-only models are surfaced, not hidden.
+fn filter_search_rows(
+    rows: &mut Vec<AnnotatedSearchResult>,
+    fit_filter: bool,
+    all: bool,
+    macos_only: bool,
+) -> (u64, u64, u64) {
+    if macos_only {
+        rows.retain(|row| matches!(row.filtered, Some(FilteredReason::PlatformRestricted)));
+        return (0, 0, 0);
+    }
+
+    let mut cloud = 0u64;
+    let mut fit = 0u64;
+
+    if !all {
         rows.retain(|row| {
-            if let Some(FilteredReason::CloudOnly) = row.filtered {
+            // Cloud-only models never run anywhere — hide them.
+            if matches!(row.filtered, Some(FilteredReason::CloudOnly)) {
                 cloud += 1;
                 return false;
             }
-            if let Some(FilteredReason::PlatformRestricted) = row.filtered {
-                platform += 1;
-                return false;
+            // macOS-only models are surfaced (kept and ordered last below).
+            if matches!(row.filtered, Some(FilteredReason::PlatformRestricted)) {
+                return true;
             }
-            if opts.fit_filter {
+            if fit_filter {
                 if let Some(fit_status) = &row.fit {
                     if !fit_status.fits() {
                         fit += 1;
@@ -178,17 +229,40 @@ fn cmd_search(
             }
             true
         });
-        (cloud, platform, fit)
-    };
-
-    rows.truncate(limit);
-
-    if wide {
-        display::print_search_results(&rows, hw, cloud_count, platform_count, fit_count);
-    } else {
-        display::print_search_results_compact(&rows, hw, cloud_count, platform_count, fit_count);
     }
-    Ok(())
+
+    // List macOS-only (fit-unknown) models after everything else, preserving
+    // search-relevance order within each group. Stable sort.
+    rows.sort_by_key(|row| {
+        u8::from(matches!(row.filtered, Some(FilteredReason::PlatformRestricted)))
+    });
+
+    (cloud, 0, fit)
+}
+
+/// Cap results at `limit` without silently dropping the (rare) macOS-only rows.
+///
+/// In `macos_only` mode every row is macOS-only, so a plain truncation applies.
+/// Otherwise macOS-only rows are held out of the cap and appended after the
+/// first `limit` other rows, so a screenful of runnable models can't bury them.
+fn truncate_rows(rows: &mut Vec<AnnotatedSearchResult>, limit: usize, macos_only: bool) {
+    if macos_only {
+        rows.truncate(limit);
+        return;
+    }
+
+    let mut others = Vec::new();
+    let mut macos_rows = Vec::new();
+    for row in rows.drain(..) {
+        if matches!(row.filtered, Some(FilteredReason::PlatformRestricted)) {
+            macos_rows.push(row);
+        } else {
+            others.push(row);
+        }
+    }
+    others.truncate(limit);
+    others.extend(macos_rows);
+    *rows = others;
 }
 
 fn cmd_search_no_fit(client: &Client, query: &str, limit: usize, wide: bool) -> Result<()> {
@@ -740,5 +814,102 @@ mod tests {
         assert!(formatted.contains("qwen3"));
         assert!(formatted.contains("1M Pulls"));
         assert!(formatted.contains("10 Tags"));
+    }
+
+    fn annotated_row(
+        name: &str,
+        filtered: Option<FilteredReason>,
+        fit: Option<crate::types::FitResult>,
+    ) -> AnnotatedSearchResult {
+        AnnotatedSearchResult {
+            result: search_result(name),
+            variant: None,
+            fit,
+            error: None,
+            filtered,
+        }
+    }
+
+    fn names(rows: &[AnnotatedSearchResult]) -> Vec<String> {
+        rows.iter().map(|r| r.result.name.clone()).collect()
+    }
+
+    #[test]
+    fn macos_only_keeps_only_platform_restricted() {
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("mac-only", Some(FilteredReason::PlatformRestricted), None),
+            annotated_row("fits", None, Some(FitResult::FitsVram)),
+            annotated_row("cloud", Some(FilteredReason::CloudOnly), None),
+            annotated_row("too-big", None, Some(FitResult::DoesNotFit { need: 10, have: 1 })),
+        ];
+        // macos_only filter drops everything that isn't macOS-gated.
+        let counts = filter_search_rows(&mut rows, true, false, true);
+        assert_eq!(counts, (0, 0, 0));
+        assert_eq!(names(&rows), vec!["mac-only"]);
+    }
+
+    #[test]
+    fn macos_only_filter_is_platform_independent() {
+        // Same inputs, same result regardless of host: the macOS gate is
+        // detected from the registry, not from the host OS.
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("fits", None, Some(FitResult::FitsVram)),
+            annotated_row("mac-a", Some(FilteredReason::PlatformRestricted), None),
+            annotated_row("mac-b", Some(FilteredReason::PlatformRestricted), None),
+        ];
+        filter_search_rows(&mut rows, true, false, true);
+        assert_eq!(names(&rows), vec!["mac-a", "mac-b"]);
+    }
+
+    #[test]
+    fn default_surfaces_macos_only_after_fits_and_hides_cloud_and_nonfitting() {
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("mac-only", Some(FilteredReason::PlatformRestricted), None),
+            annotated_row("cloud", Some(FilteredReason::CloudOnly), None),
+            annotated_row("too-big", None, Some(FitResult::DoesNotFit { need: 10, have: 1 })),
+            annotated_row("fits", None, Some(FitResult::FitsVram)),
+        ];
+        let counts = filter_search_rows(&mut rows, true, false, false);
+        assert_eq!(counts, (1, 0, 1)); // 1 cloud + 1 non-fitting hidden; macOS-only NOT hidden
+        assert_eq!(names(&rows), vec!["fits", "mac-only"]); // runnable first, macOS-only after
+    }
+
+    #[test]
+    fn truncate_keeps_macos_only_rows_past_the_limit() {
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("fits1", None, Some(FitResult::FitsVram)),
+            annotated_row("fits2", None, Some(FitResult::FitsVram)),
+            annotated_row("mac", Some(FilteredReason::PlatformRestricted), None),
+        ];
+        truncate_rows(&mut rows, 1, false);
+        // 1 runnable kept by the limit; the macOS-only row is appended, not dropped.
+        assert_eq!(names(&rows), vec!["fits1", "mac"]);
+    }
+
+    #[test]
+    fn truncate_in_macos_only_mode_caps_normally() {
+        let mut rows = vec![
+            annotated_row("mac1", Some(FilteredReason::PlatformRestricted), None),
+            annotated_row("mac2", Some(FilteredReason::PlatformRestricted), None),
+        ];
+        truncate_rows(&mut rows, 1, true);
+        assert_eq!(names(&rows), vec!["mac1"]);
+    }
+
+    #[test]
+    fn all_flag_keeps_everything_macos_only_last() {
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("mac-only", Some(FilteredReason::PlatformRestricted), None),
+            annotated_row("cloud", Some(FilteredReason::CloudOnly), None),
+            annotated_row("fits", None, Some(FitResult::FitsVram)),
+        ];
+        let counts = filter_search_rows(&mut rows, true, true, false);
+        assert_eq!(counts, (0, 0, 0));
+        assert_eq!(names(&rows), vec!["cloud", "fits", "mac-only"]); // macOS-only ordered last
     }
 }
