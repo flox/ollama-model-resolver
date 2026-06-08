@@ -17,6 +17,6 @@ rustPlatform.buildRustPackage rec {
     description = "Resolve the best Ollama model variant for local hardware";
     license = lib.licenses.mit;
     mainProgram = "ollama-model-resolver";
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }
