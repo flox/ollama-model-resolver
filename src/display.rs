@@ -71,7 +71,7 @@ pub fn print_search_results(
             (Some(variant), Some(fit)) => (
                 terminal_line(&variant.full_ref),
                 fit_summary_colored(fit),
-                ByteSize(variant.weights_bytes).to_string(),
+                weight_cell(variant, fit),
             ),
             _ => {
                 let fit_text = match row.filtered {
@@ -123,7 +123,7 @@ pub fn print_search_results_compact(
             (Some(variant), Some(fit)) => {
                 fields.push(format!("{:<16}", variant.full_ref));
                 fields.push(format!("{:<18}", fit_summary_compact(fit)));
-                fields.push(ByteSize(variant.weights_bytes).to_string());
+                fields.push(weight_cell(variant, fit));
                 fields.push(row.result.pulls.clone());
             }
             _ => {
@@ -264,6 +264,10 @@ pub fn print_fit_indicator(fit: &FitResult) {
             ByteSize(*need),
             ByteSize(*have)
         ),
+        FitResult::MacosOnly => println!(
+            "  {} macOS-only model — size/fit not verified; the local Ollama daemon checks at pull",
+            "?".cyan().bold()
+        ),
     }
     println!();
 }
@@ -350,6 +354,7 @@ fn fit_summary_colored(fit: &FitResult) -> String {
         FitResult::FitsVram => fit.summary().green().to_string(),
         FitResult::FitsWithSplit { .. } | FitResult::FitsRamOnly => fit.summary().yellow().to_string(),
         FitResult::DoesNotFit { .. } | FitResult::InsufficientDisk { .. } => fit.summary().red().to_string(),
+        FitResult::MacosOnly => "macOS-only".cyan().to_string(),
     }
 }
 
@@ -390,7 +395,10 @@ fn platform_restricted_cell() -> String {
 pub fn print_macos_only_note(rows: &[AnnotatedSearchResult]) {
     let count = rows
         .iter()
-        .filter(|r| matches!(r.filtered, Some(FilteredReason::PlatformRestricted)))
+        .filter(|r| {
+            matches!(r.fit, Some(FitResult::MacosOnly))
+                || matches!(r.filtered, Some(FilteredReason::PlatformRestricted))
+        })
         .count();
     if count > 0 {
         let note = if cfg!(target_os = "macos") {
@@ -406,6 +414,16 @@ pub fn print_macos_only_note(rows: &[AnnotatedSearchResult]) {
     }
 }
 
+/// Weight column for a result row. macOS-only variants are unsizable (manifest
+/// gated), so show an em dash instead of a bogus "0 B".
+fn weight_cell(variant: &ModelVariant, fit: &FitResult) -> String {
+    if matches!(fit, FitResult::MacosOnly) {
+        "—".to_string()
+    } else {
+        ByteSize(variant.weights_bytes).to_string()
+    }
+}
+
 fn fit_summary_compact(fit: &FitResult) -> String {
     match fit {
         FitResult::FitsVram => "✓ fits GPU".green().to_string(),
@@ -413,6 +431,7 @@ fn fit_summary_compact(fit: &FitResult) -> String {
         FitResult::FitsRamOnly => "~ RAM / CPU".yellow().to_string(),
         FitResult::DoesNotFit { .. } => "✗ does not fit".red().to_string(),
         FitResult::InsufficientDisk { .. } => "✗ disk short".red().to_string(),
+        FitResult::MacosOnly => "macOS-only".cyan().to_string(),
     }
 }
 

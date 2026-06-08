@@ -197,6 +197,19 @@ impl TagInfo {
     pub fn approx_size_bytes(&self) -> Option<u64> {
         self.approx_size.as_deref().and_then(parse_human_size_bytes)
     }
+
+    /// Whether this tag is a macOS-only (Apple-Silicon-optimized) variant.
+    /// Ollama gates these behind HTTP 412 "this model requires macOS"; they are
+    /// identified by quantization marker in the tag name. Currently that is
+    /// `nvfp4` (NVFP4); extend here if Ollama adds other macOS-only formats.
+    pub fn is_macos_only(&self) -> bool {
+        is_macos_only_tag(&self.tag)
+    }
+}
+
+/// Whether a tag name denotes a macOS-only variant (see `TagInfo::is_macos_only`).
+pub fn is_macos_only_tag(tag: &str) -> bool {
+    tag.to_ascii_lowercase().contains("nvfp4")
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +219,9 @@ pub enum FitResult {
     FitsRamOnly,
     DoesNotFit { need: u64, have: u64 },
     InsufficientDisk { need: u64, have: u64 },
+    /// macOS-only variant: runnable only on macOS, and its manifest is gated so
+    /// we cannot size it. Carries no fit verdict.
+    MacosOnly,
 }
 
 impl FitResult {
@@ -223,6 +239,7 @@ impl FitResult {
             FitResult::FitsRamOnly => "fits RAM / CPU".to_string(),
             FitResult::DoesNotFit { .. } => "does not fit".to_string(),
             FitResult::InsufficientDisk { .. } => "estimated disk shortfall".to_string(),
+            FitResult::MacosOnly => "macOS-only".to_string(),
         }
     }
 }
