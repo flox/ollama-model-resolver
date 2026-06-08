@@ -57,8 +57,6 @@ pub fn print_search_results(
     platform_count: u64,
     fit_count: u64,
 ) {
-    let hidden_count = cloud_count + platform_count + fit_count;
-
     print_hardware(hw);
 
     let mut table = Table::new();
@@ -102,23 +100,7 @@ pub fn print_search_results(
 
     println!("{table}");
 
-    if hidden_count > 0 {
-        let mut parts = Vec::new();
-        if cloud_count > 0 {
-            parts.push(format!("{cloud_count} cloud-only"));
-        }
-        if platform_count > 0 {
-            parts.push(format!("{platform_count} platform-restricted"));
-        }
-        if fit_count > 0 {
-            parts.push(format!("{fit_count} does not fit"));
-        }
-        let breakdown = parts.join(", ");
-        println!(
-            "  {} hidden. Use --all to show all models.",
-            breakdown.dimmed()
-        );
-    }
+    print_hidden_footer(cloud_count, platform_count, fit_count);
 }
 
 pub fn print_search_results_compact(
@@ -128,8 +110,6 @@ pub fn print_search_results_compact(
     platform_count: u64,
     fit_count: u64,
 ) {
-    let hidden_count = cloud_count + platform_count + fit_count;
-
     print_hardware(hw);
 
     let header = "  Name                                     Variant            Fit                Weights   Pulls    Tags    Updated        Description";
@@ -174,23 +154,7 @@ pub fn print_search_results_compact(
         );
     }
 
-    if hidden_count > 0 {
-        let mut parts = Vec::new();
-        if cloud_count > 0 {
-            parts.push(format!("{cloud_count} cloud-only"));
-        }
-        if platform_count > 0 {
-            parts.push(format!("{platform_count} platform-restricted"));
-        }
-        if fit_count > 0 {
-            parts.push(format!("{fit_count} does not fit"));
-        }
-        let breakdown = parts.join(", ");
-        println!(
-            "  {} hidden. Use --all to show all models.",
-            breakdown.dimmed()
-        );
-    }
+    print_hidden_footer(cloud_count, platform_count, fit_count);
 }
 
 
@@ -386,6 +350,31 @@ fn fit_summary_colored(fit: &FitResult) -> String {
         FitResult::FitsVram => fit.summary().green().to_string(),
         FitResult::FitsWithSplit { .. } | FitResult::FitsRamOnly => fit.summary().yellow().to_string(),
         FitResult::DoesNotFit { .. } | FitResult::InsufficientDisk { .. } => fit.summary().red().to_string(),
+    }
+}
+
+/// Footer summarizing models hidden from the view. Cloud-only and non-fitting
+/// models are revealed by `--all`; macOS-only models (hidden only on Linux,
+/// where they can't run) are revealed by `--macos`, so they get their own line.
+fn print_hidden_footer(cloud: u64, platform: u64, fit: u64) {
+    let mut parts = Vec::new();
+    if cloud > 0 {
+        parts.push(format!("{cloud} cloud-only"));
+    }
+    if fit > 0 {
+        parts.push(format!("{fit} does not fit"));
+    }
+    if !parts.is_empty() {
+        println!(
+            "  {}",
+            format!("{} hidden. Use --all to show all models.", parts.join(", ")).dimmed()
+        );
+    }
+    if platform > 0 {
+        println!(
+            "  {}",
+            format!("{platform} macOS-only model(s) hidden. Use --macos to list them.").dimmed()
+        );
     }
 }
 
