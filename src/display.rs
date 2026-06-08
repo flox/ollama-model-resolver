@@ -27,7 +27,10 @@ pub fn print_hardware(hw: &HardwareProfile) {
     if let Some(value) = &hw.cuda_visible_devices {
         println!("  {:<14} {}", "CUDA_VISIBLE:".dimmed(), terminal_line(value));
     }
-    if hw.has_gpu() {
+    // On Apple Silicon unified memory there is no separate VRAM; the fit ceiling
+    // is the available figure in the RAM line below, so skip the VRAM basis line
+    // to avoid implying the full installed total is the fit basis.
+    if hw.has_gpu() && hw.unified_mem_total == 0 {
         println!(
             "  {:<14} {}",
             "VRAM basis:".dimmed(),

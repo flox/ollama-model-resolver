@@ -403,18 +403,28 @@ pub fn check_fit(variant: &ModelVariant, hw: &HardwareProfile, opts: &ResolveOpt
 
     let estimated = variant.estimated_runtime_bytes;
 
+    // Apple Silicon unified memory: VRAM and system RAM are one physical pool,
+    // so there is no split to consider. Fit against the memory available right
+    // now (ram_available) rather than the full installed total, so the decision
+    // reflects current system load.
+    if hw.unified_mem_total > 0 {
+        let ceiling = hw.unified_fit_ceiling();
+        return if estimated <= ceiling {
+            FitResult::FitsVram
+        } else {
+            FitResult::DoesNotFit {
+                need: estimated,
+                have: ceiling,
+            }
+        };
+    }
+
     if hw.has_gpu() {
         if estimated <= hw.vram_total {
             return FitResult::FitsVram;
         }
 
-        let combined = if hw.unified_mem_total > 0 {
-            // darwin: vram_total and ram_available are the same unified pool.
-            // Don't add them together — that would double-count.
-            hw.vram_total
-        } else {
-            hw.vram_total.saturating_add(hw.ram_available)
-        };
+        let combined = hw.vram_total.saturating_add(hw.ram_available);
         if opts.allow_split && estimated <= combined {
             let gpu_pct = if estimated == 0 {
                 100.0
@@ -460,7 +470,6 @@ mod tests {
             cuda_visible_devices: None,
             gpu_fit_policy: crate::types::GpuFitPolicy::Best,
             unified_mem_total: 0,
-            unified_mem_free: 0,
         }
     }
 
@@ -579,6 +588,61 @@ mod tests {
     fn disk_check_takes_precedence() {
         let fit = check_fit(&variant(10, 200, 12), &hw(100, 100, 100), &opts());
         assert!(matches!(fit, FitResult::InsufficientDisk { .. }));
+    }
+
+    // Apple Silicon unified memory: pool total is `total`, free-right-now is
+    // `free`. has_gpu() must stay true, so vram_total mirrors the pool total.
+    fn unified_hw(total: u64, free: u64, disk: u64) -> HardwareProfile {
+        HardwareProfile {
+            gpu_name: Some("Apple Silicon (Unified)".into()),
+            vram_total: total,
+            vram_free: total, // deprecated: always equal to vram_total
+            ram_total: total,
+            ram_available: free,
+            disk_free: disk,
+            models_dir: PathBuf::from("/tmp"),
+            gpus: Vec::new(),
+            selected_gpu_indices: vec![0],
+            cuda_visible_devices: None,
+            gpu_fit_policy: crate::types::GpuFitPolicy::Best,
+            unified_mem_total: total,
+        }
+    }
+
+    #[test]
+    fn unified_fits_against_available_memory() {
+        // estimated 10 <= free 12 -> fits, even though pool total is 16.
+        let fit = check_fit(&variant(8, 8, 10), &unified_hw(16, 12, 100), &opts());
+        assert!(matches!(fit, FitResult::FitsVram));
+    }
+
+    #[test]
+    fn unified_rejects_above_available_even_when_below_pool_total() {
+        // estimated 14 > free 12 but < pool total 16: conservative path rejects.
+        let fit = check_fit(&variant(11, 11, 14), &unified_hw(16, 12, 100), &opts());
+        match fit {
+            FitResult::DoesNotFit { need, have } => {
+                assert_eq!(need, 14);
+                assert_eq!(have, 12); // reports free-right-now, not the 16 pool
+            }
+            other => panic!("expected DoesNotFit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unified_ignores_split() {
+        // --split must not rescue a model that exceeds the unified pool's free
+        // memory; there is no separate VRAM/RAM to split across.
+        let fit = check_fit(&variant(11, 11, 14), &unified_hw(16, 12, 100), &split_opts());
+        assert!(matches!(fit, FitResult::DoesNotFit { .. }));
+    }
+
+    #[test]
+    fn unified_falls_back_to_pool_total_when_available_reads_zero() {
+        // ram_available == 0 signals a failed vm_statistics read; fall back to
+        // the pool total so a transient failure does not reject every model.
+        let fit = check_fit(&variant(11, 11, 14), &unified_hw(16, 0, 100), &opts());
+        assert!(matches!(fit, FitResult::FitsVram));
     }
 
     #[test]

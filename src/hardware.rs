@@ -14,12 +14,12 @@ pub fn detect_with_policy(
     gpu_fit_policy: GpuFitPolicy,
 ) -> Result<HardwareProfile> {
     let models_dir = models_dir.unwrap_or_else(default_models_dir);
-    let unified = detect_unified_mem();
+    let unified_total = detect_unified_mem();
     let gpus = detect_gpus();
     let cuda_visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
 
-    let (gpu_name, vram_total, vram_free, selected_gpu_indices) = if let Some((total, free)) = unified {
-        select_unified_fit_basis(total, free)
+    let (gpu_name, vram_total, vram_free, selected_gpu_indices) = if let Some(total) = unified_total {
+        select_unified_fit_basis(total)
     } else {
         select_gpu_fit_basis(&gpus, gpu_fit_policy)
     };
@@ -39,8 +39,7 @@ pub fn detect_with_policy(
         selected_gpu_indices,
         cuda_visible_devices,
         gpu_fit_policy,
-        unified_mem_total: unified.map_or(0, |(t, _)| t),
-        unified_mem_free: unified.map_or(0, |(_, f)| f),
+        unified_mem_total: unified_total.unwrap_or(0),
     })
 }
 
@@ -253,10 +252,14 @@ fn detect_ram() -> Result<(u64, u64)> {
 
 #[cfg(target_os = "macos")]
 fn detect_ram() -> Result<(u64, u64)> {
-    let unified = detect_unified_mem().unwrap_or((0, 0));
+    // Read hw.memsize directly for the RAM total rather than threading it back
+    // out of detect_unified_mem(). Both read the same sysctl; reading it here
+    // keeps ram_total and the unified-pool total from drifting if the
+    // Apple-Silicon detection in detect_unified_mem ever changes.
+    let ram_total = sysctl_value("hw.memsize")
+        .ok_or_else(|| ResolverError::RamDetection("hw.memsize unavailable".into()))?;
     let ram_available = darwin_free_ram_bytes().unwrap_or(0);
-    // ram_total = unified total (hw.memsize), ram_available from vm_statistics
-    Ok((unified.0, ram_available))
+    Ok((ram_total, ram_available))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -305,92 +308,108 @@ fn existing_ancestor(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Select GPU fit basis from Apple Silicon unified memory.
-fn select_unified_fit_basis(total: u64, free: u64) -> (Option<String>, u64, u64, Vec<u32>) {
+/// Select GPU fit basis from Apple Silicon unified memory. The fit ceiling comes
+/// from ram_available on the profile (see HardwareProfile::unified_fit_ceiling);
+/// vram_free is the deprecated, always-equal-to-vram_total field, so it mirrors
+/// the pool total here rather than carrying a separate "free" value.
+fn select_unified_fit_basis(total: u64) -> (Option<String>, u64, u64, Vec<u32>) {
     (
         Some("Apple Silicon (Unified)".into()),
         total,
-        free,
+        total,
         vec![0],
     )
 }
 
 /// Detect Apple Silicon unified memory via sysctl.
-/// Returns Some((total, free)) on Apple Silicon; None on Intel Macs and Linux.
+/// Returns Some(total_bytes) on Apple Silicon; None on Intel Macs and Linux.
 #[cfg(target_os = "macos")]
-fn detect_unified_mem() -> Option<(u64, u64)> {
-    // hw.cpufamily = 0x97a2f6cf identifies Apple Silicon (A/M series SoCs).
-    // NOTE: T2 Intel Macs (2018-2019 MacBook Pro) also report this cpufamily.
-    // On those machines the iGPU shares system RAM, so this label is slightly
-    // inaccurate — but the memory value is still correct and the model fits.
-    let cpufamily = sysctl_value("hw.cpufamily")?;
-    if cpufamily != 0x97a2f6cf {
+fn detect_unified_mem() -> Option<u64> {
+    // hw.optional.arm64 == 1 identifies Apple Silicon (all M-series SoCs).
+    // We deliberately do NOT key off hw.cpufamily: that value differs per chip
+    // generation (M1, M2, M3, M4 each report a distinct family), so an equality
+    // check against any single constant only matches one generation. Intel Macs
+    // report 0 / absent here and fall through to the discrete-GPU path.
+    if sysctl_value("hw.optional.arm64").unwrap_or(0) != 1 {
         return None;
     }
-    let total = sysctl_value("hw.memsize")?;
-    let free = darwin_free_ram_bytes().unwrap_or(0);
-    Some((total, free))
+    sysctl_value("hw.memsize")
 }
 
 /// Non-macos stub: no unified memory.
 #[cfg(not(target_os = "macos"))]
-fn detect_unified_mem() -> Option<(u64, u64)> {
+fn detect_unified_mem() -> Option<u64> {
     None
 }
 
-/// Read a u64 sysctl value by name.
+/// Read an integer sysctl value by name. Handles both 4-byte (int/uint32, e.g.
+/// `hw.cpufamily`, `hw.ncpu`, `hw.optional.arm64`) and 8-byte (e.g. `hw.memsize`,
+/// and `hw.pagesize`, which is a 64-bit long on 64-bit macOS) values.
 #[cfg(target_os = "macos")]
 fn sysctl_value(name: &str) -> Option<u64> {
     use std::ffi::CString;
     let c = CString::new(name).ok()?;
     let mut len: usize = 0;
-    unsafe {
+    // sysctlbyname returns 0 on success, -1 on error (errno set).
+    let rc = unsafe {
         libc::sysctlbyname(
             c.as_ptr(),
             std::ptr::null_mut(),
             &mut len,
-            std::ptr::null(),
+            std::ptr::null_mut(),
             0,
         )
+    };
+    if rc != 0 {
+        return None;
     }
-    .ok()?;
     let mut buf = vec![0u8; len];
-    unsafe {
+    let rc = unsafe {
         libc::sysctlbyname(
             c.as_ptr(),
             buf.as_mut_ptr() as *mut _,
             &mut len,
-            std::ptr::null(),
+            std::ptr::null_mut(),
             0,
         )
+    };
+    if rc != 0 {
+        return None;
     }
-    .ok()?;
-    if buf.len() >= 8 {
-        u64::from_ne_bytes(buf[..8].try_into().ok()?)
-    } else {
-        None
+    match len {
+        8 => Some(u64::from_ne_bytes(buf[..8].try_into().ok()?)),
+        4 => Some(u32::from_ne_bytes(buf[..4].try_into().ok()?) as u64),
+        _ => None,
     }
 }
 
-/// Get free RAM on darwin via vm_statistics_page_count.
-/// Returns (free_bytes, unified_total) or None on failure.
+/// Get available RAM on darwin. Returns available bytes, or None on failure.
 ///
-/// This is the darwin equivalent of Linux's /proc/meminfo MemAvailable:
-/// free pages (no active mapping) × page size.
+/// This is the darwin analogue of Linux's /proc/meminfo MemAvailable. Counting
+/// only free pages drastically understates available memory on macOS, which
+/// keeps most RAM mapped as active/inactive/cached and reclaims it on demand.
+/// Instead we mirror the kernel's own "memory free" notion (what Activity
+/// Monitor and `memory_pressure` report): total RAM minus the pages that cannot
+/// be reclaimed for a new allocation — wired pages and pages already held by the
+/// compressor.
 #[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc::mach_host_self is the standard accessor; mach2 is not a dependency.
 fn darwin_free_ram_bytes() -> Option<u64> {
     use std::mem;
 
-    // host_page_size returns the page size in bytes.
-    let page_size = unsafe { libc::host_page_size() as u64 };
-    if page_size == 0 {
+    // Page size in bytes via sysconf(_SC_PAGESIZE).
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
         return None;
     }
+    let page_size = page_size as u64;
+
+    let total = sysctl_value("hw.memsize")?;
 
     // host_statistics64 with HOST_VM_INFO64 retrieves vm_statistics64_data_t.
     let mut vm_stat: libc::vm_statistics64_data_t = unsafe { mem::zeroed() };
-    let mut count: libc::mach_msg_type_number_t = 0;
-    count = (mem::size_of::<libc::vm_statistics64_data_t>() / mem::size_of::<i32>()) as libc::mach_msg_type_number_t;
+    let mut count: libc::mach_msg_type_number_t =
+        (mem::size_of::<libc::vm_statistics64_data_t>() / mem::size_of::<i32>()) as libc::mach_msg_type_number_t;
 
     let host = unsafe { libc::mach_host_self() };
     let ret = unsafe {
@@ -407,9 +426,13 @@ fn darwin_free_ram_bytes() -> Option<u64> {
         return None;
     }
 
-    // free pages with no active mapping
-    let free_pages = vm_stat.free_count as u64;
-    Some(free_pages.saturating_mul(page_size))
+    // Non-reclaimable pages: wired (kernel/locked) plus pages occupied by the
+    // compressor. Everything else (free, active, inactive, speculative,
+    // purgeable, file-backed) can be made available under memory pressure.
+    let unavailable_pages =
+        (vm_stat.wire_count as u64).saturating_add(vm_stat.compressor_page_count as u64);
+    let unavailable_bytes = unavailable_pages.saturating_mul(page_size);
+    Some(total.saturating_sub(unavailable_bytes))
 }
 
 #[allow(deprecated)]
@@ -421,6 +444,54 @@ mod tests {
     #[test]
     fn parses_meminfo_line() {
         assert_eq!(parse_meminfo_kb("MemAvailable:   12345 kB"), Some(12345));
+    }
+
+    // hw.memsize is a uint64 sysctl, exercising the 8-byte path of sysctl_value.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sysctl_value_reads_8_byte_memsize() {
+        let memsize = sysctl_value("hw.memsize").expect("hw.memsize should be readable");
+        assert!(memsize >= 1 << 30, "memsize unexpectedly small: {memsize}");
+    }
+
+    // hw.ncpu is a 4-byte int sysctl, exercising the 4-byte path of sysctl_value.
+    // (hw.pagesize is NOT 4-byte on 64-bit macOS — it returns 8 bytes — so it
+    // would exercise the wrong arm.) This is the same arm hw.optional.arm64 and
+    // hw.cpufamily use, which the Apple-Silicon detection depends on.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sysctl_value_reads_4_byte_ncpu() {
+        let ncpu = sysctl_value("hw.ncpu").expect("hw.ncpu should be readable");
+        assert!(ncpu > 0, "hw.ncpu should be positive");
+        assert!(ncpu <= 4096, "hw.ncpu implausibly large: {ncpu}");
+    }
+
+    // Unknown name: sysctlbyname fails on the first (sizing) call, so we get None.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sysctl_value_returns_none_for_unknown_name() {
+        assert_eq!(sysctl_value("definitely.not.a.real.sysctl.xyzzy"), None);
+    }
+
+    // An interior NUL makes CString::new fail; sysctl_value must return None, not panic.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sysctl_value_returns_none_for_name_with_interior_nul() {
+        assert_eq!(sysctl_value("hw.mem\0size"), None);
+    }
+
+    // Available RAM must be positive and never exceed installed RAM.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_free_ram_is_positive_and_within_total() {
+        let total = sysctl_value("hw.memsize").expect("hw.memsize should be readable");
+        let available =
+            darwin_free_ram_bytes().expect("darwin_free_ram_bytes should succeed on macOS");
+        assert!(available > 0, "available RAM should be positive");
+        assert!(
+            available <= total,
+            "available {available} should not exceed total {total}"
+        );
     }
 
     #[test]

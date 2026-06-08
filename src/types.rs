@@ -51,9 +51,8 @@ pub struct HardwareProfile {
     pub cuda_visible_devices: Option<String>,
     pub gpu_fit_policy: GpuFitPolicy,
     /// Apple Silicon unified memory total (bytes). Zero on non-darwin platforms.
+    /// Non-zero signals the unified-memory fit path; see [`Self::unified_fit_ceiling`].
     pub unified_mem_total: u64,
-    /// Apple Silicon unified memory free (bytes). Zero on non-darwin platforms.
-    pub unified_mem_free: u64,
 }
 
 impl HardwareProfile {
@@ -71,7 +70,26 @@ impl HardwareProfile {
         self.selected_gpu_indices.len()
     }
 
+    /// Fit ceiling for Apple Silicon unified memory: the memory available right
+    /// now. Falls back to the installed pool total if the available reading came
+    /// back as 0 — on a healthy machine `total - wired - compressed` is always
+    /// positive, so 0 means the vm_statistics read failed, and we must not mark
+    /// every model as non-fitting because of a transient detection failure.
+    pub fn unified_fit_ceiling(&self) -> u64 {
+        if self.ram_available > 0 {
+            self.ram_available
+        } else {
+            self.unified_mem_total
+        }
+    }
+
     pub fn available_runtime_bytes(&self, allow_split: bool) -> u64 {
+        // Apple Silicon unified memory: a single pool sized by available memory
+        // (memory free right now). There is no separate VRAM, so --split does
+        // not apply. Mirrors the unified branch in resolver::check_fit.
+        if self.unified_mem_total > 0 {
+            return self.unified_fit_ceiling();
+        }
         if self.has_gpu() {
             if allow_split {
                 self.vram_total.saturating_add(self.ram_available)

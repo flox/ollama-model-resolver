@@ -59,6 +59,7 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             if fit {
                 let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
+                warn_if_split_ignored(&hw, cli.allow_split);
                 cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide)
             } else {
                 cmd_search_no_fit(&metadata_client, &query, limit, wide)
@@ -76,6 +77,7 @@ pub fn run(cli: Cli) -> Result<()> {
             let selection = ModelSelectionOptions::new(quiet, select, first, fail_on_ambiguous)?;
             if model.ends_with('?') {
                 let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
+                warn_if_split_ignored(&hw, cli.allow_split);
                 cmd_resolve(
                     &metadata_client,
                     &pull_client,
@@ -96,6 +98,17 @@ pub fn run(cli: Cli) -> Result<()> {
             let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
             cmd_info(&metadata_client, &cli.ollama_host, cli.ollama_port, &hw)
         }
+    }
+}
+
+/// On Apple Silicon unified memory there is no separate VRAM and system RAM to
+/// split across, so --split has no effect. Surface that rather than silently
+/// accepting the flag.
+fn warn_if_split_ignored(hw: &HardwareProfile, allow_split: bool) {
+    if allow_split && hw.unified_mem_total > 0 {
+        eprintln!(
+            "Note: --split has no effect on Apple Silicon unified memory; VRAM and system RAM are a single pool."
+        );
     }
 }
 
