@@ -390,6 +390,16 @@ fn platform_restricted_cell() -> String {
     "macOS-only".cyan().to_string()
 }
 
+/// Note that the result set and its ranking come from ollama.com's search, not
+/// from this tool — broad queries can surface loosely-related models.
+pub fn print_search_ranking_note() {
+    println!(
+        "  {}",
+        "Matches and their order come from ollama.com search (not this tool); broad queries may surface loosely-related models."
+            .dimmed()
+    );
+}
+
 /// Print a one-line note when macOS-only models are shown, explaining the
 /// unverified fit. Platform-independent.
 pub fn print_macos_only_note(rows: &[AnnotatedSearchResult]) {

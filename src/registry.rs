@@ -19,6 +19,7 @@ pub trait Registry {
 pub struct HttpRegistry<'a> {
     client: &'a Client,
     manifest_cache: HashMap<(String, String), (u64, u64)>,
+    tags_cache: HashMap<String, Vec<TagInfo>>,
 }
 
 impl<'a> HttpRegistry<'a> {
@@ -26,6 +27,7 @@ impl<'a> HttpRegistry<'a> {
         Self {
             client,
             manifest_cache: HashMap::new(),
+            tags_cache: HashMap::new(),
         }
     }
 
@@ -37,7 +39,14 @@ impl<'a> HttpRegistry<'a> {
 
 impl Registry for HttpRegistry<'_> {
     fn list_tags(&mut self, model: &str) -> Result<Vec<TagInfo>> {
-        list_tags(self.client, model)
+        // Cached per run: the default search path lists a model's tags both to
+        // resolve a runnable variant and to detect macOS-only variants.
+        if let Some(cached) = self.tags_cache.get(model) {
+            return Ok(cached.clone());
+        }
+        let tags = list_tags(self.client, model)?;
+        self.tags_cache.insert(model.to_string(), tags.clone());
+        Ok(tags)
     }
 
     fn get_manifest_size(&mut self, model: &str, tag: &str) -> Result<(u64, u64)> {
@@ -64,6 +73,40 @@ pub fn search_models(client: &Client, query: &str) -> Result<Vec<SearchResult>> 
     }
 
     Ok(results)
+}
+
+/// Name-relevance tier of a model to a query: `2` exact, `1` name-relevant,
+/// `0` no name relevance. Token-based — a name splits on `-` `:` `_` `.` after
+/// dropping any `user/` namespace; deliberately NOT bare-substring, which would
+/// match `emma` inside `gemma4`.
+///
+/// Tiers are intentionally coarse. We only need "is this a name match or popular
+/// padding?"; within a tier we keep ollama.com's popularity order (via the
+/// stable sort in `rank_search_results`). Finer weights would do harm — e.g.
+/// ranking "token == query" above "name starts-with" floats `llama-guard3` over
+/// the far more relevant `llama3.1` for the query "llama".
+pub fn relevance_score(query: &str, name: &str) -> u32 {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return 0;
+    }
+    let n = name.to_ascii_lowercase();
+    let base = n.rsplit('/').next().unwrap_or(n.as_str());
+    let tokens = base.split(['-', ':', '_', '.']).filter(|t| !t.is_empty());
+
+    if n == q || base == q {
+        2 // exact name
+    } else if base.starts_with(&q) || tokens.into_iter().any(|t| t == q || t.starts_with(&q)) {
+        1 // name-relevant: name/token prefix or an exact token
+    } else {
+        0 // no name relevance (popular padding)
+    }
+}
+
+/// Re-rank search results by `relevance_score`, highest tier first. Stable, so
+/// within a tier ollama.com's popularity order is preserved.
+pub fn rank_search_results(results: &mut [SearchResult], query: &str) {
+    results.sort_by(|a, b| relevance_score(query, &b.name).cmp(&relevance_score(query, &a.name)));
 }
 
 fn ollama_model_path(model: &str) -> String {
@@ -482,6 +525,47 @@ fn natural_tag_order_key(tag: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sr(name: &str) -> SearchResult {
+        SearchResult {
+            name: name.to_string(),
+            description: String::new(),
+            pulls: String::new(),
+            tag_count: String::new(),
+            updated: String::new(),
+        }
+    }
+
+    #[test]
+    fn relevance_score_token_based_not_substring() {
+        // Exact = 2; name/token prefix or exact token = 1; bare substring = 0.
+        assert_eq!(relevance_score("qwen", "qwen"), 2); // exact
+        assert_eq!(relevance_score("coder", "qwen2.5-coder"), 1); // exact token
+        assert_eq!(relevance_score("qwen", "qwen3"), 1); // name prefix
+        assert_eq!(relevance_score("glm", "glm-5.1"), 1); // token "glm"
+        assert_eq!(relevance_score("gwen", "goktugkoksal/gwen2_05"), 1); // token prefix, namespaced
+        // The padding cases that motivated this — all 0 (no token match):
+        assert_eq!(relevance_score("glm", "gemma4"), 0);
+        assert_eq!(relevance_score("gwen", "gemma4"), 0);
+        assert_eq!(relevance_score("emma", "gemma4"), 0); // NOT a substring match
+    }
+
+    #[test]
+    fn rank_search_results_keeps_popularity_order_within_relevant_tier() {
+        // gemma4 is popular padding (tier 0); the glm models (tier 1) come first,
+        // and among them ollama's incoming order is preserved (stable).
+        let mut results = vec![sr("gemma4"), sr("glm-5.1"), sr("granite4"), sr("glm4")];
+        rank_search_results(&mut results, "glm");
+        assert_eq!(results[0].name, "glm-5.1");
+        assert_eq!(results[1].name, "glm4");
+        assert_eq!(results[2].name, "gemma4"); // tier-0 padding kept, but last
+
+        // Coarse tiers don't invert popularity: a token-exact match does NOT
+        // float above a name-prefix match, so the incoming order is preserved.
+        let mut llama = vec![sr("llama3.1"), sr("llama-guard3")];
+        rank_search_results(&mut llama, "llama");
+        assert_eq!(llama[0].name, "llama3.1"); // stays first (was first in)
+    }
 
     #[test]
     fn parses_search_fallback_links() {
