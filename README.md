@@ -29,15 +29,17 @@ When search finds no exact model name in normal interactive mode, the resolver p
 
 Default search (`search qwen`) performs a library-only lookup and prints a compact one-line-per-model layout — all 20 results fit on screen without scrolling. Each row shows name, pulls, tags, updated date, and a truncated description.
 
+Across all search modes, results are re-ranked by name relevance before display. ollama.com orders matches by popularity, which can bury name matches under popular unrelated models — a search for `glm` otherwise surfaces `gemma4` first. The resolver promotes models whose name (or a `-`/`_`/`.`/`:`-separated name token) matches the query, and keeps ollama.com's popularity order within a relevance tier. Matching is token-based, not bare substring, so `emma` does not match `gemma4`. The trade-off: a family name buried mid-word (for example `codellama` for the query `llama`) counts as unrelated and ranks with the popularity padding. A footer note reminds you that the matches and their order originate from ollama.com, not this tool. Re-ranking only reorders what ollama.com returns (a fixed ~20 results, no pagination); it cannot surface a model ollama.com does not return.
+
 With `--fit`, search also resolves tags and checks hardware fit. Models whose estimated runtime exceeds available memory (`DoesNotFit`, `InsufficientDisk`) are hidden by default, along with cloud-only models that have no local weights. Use `--all` to show everything, including non-fitting and cloud-only models. `--split` is honored: models that fit with a VRAM/RAM split pass `.fits()` and remain visible.
 
-macOS-only models — those the Ollama registry gates to macOS (for example `nvfp4` quantizations, which return HTTP 412 "this model requires macOS") — are handled by host platform. On macOS they are runnable through the local Ollama daemon, so they appear as first-class results in the normal relevance order, labeled `macOS-only`; their manifests are gated so the resolver cannot size them, and a note explains the daemon checks fit at pull time. On Linux they cannot run, so they are hidden from the default view — reach them with `--all` (everything) or `--macos` (only macOS-only). A model counts as macOS-only only when every candidate tag is gated; a model that also offers a normal runnable tag resolves to that tag instead.
+macOS-only models — variants the Ollama registry gates to macOS (currently `nvfp4` quantizations; the registry returns HTTP 412 "this model requires macOS" for them) — are identified by **tag name**, since their manifests are gated and cannot be sized. A model that *offers* such a variant gets an extra `macOS-only` row showing its largest such variant as the representative. A model with both runnable and macOS-only tags therefore appears twice — once for its best fitting tag, once for its macOS-only variant (e.g. `qwen3.5:9b` and `qwen3.5:35b-a3b-nvfp4`). The weight column shows `—` (unsizable) and a note explains the local Ollama daemon checks fit at pull. On macOS these rows appear in the default `--fit` view, after the runnable results, with reserved slots so they are not crowded out. On Linux they cannot run, so they are hidden from the default view — reach them with `--all` (everything) or `--macos`. Only name-relevant models contribute macOS-only rows, so an unrelated popular model that happens to ship an `nvfp4` tag is not surfaced.
 
-With `--macos`, search shows **only** macOS-only models and filters everything else out. This works on any host OS (the gate is detected from the registry, not the local platform), so it is also a way to discover macOS-only models from Linux. `--macos` implies hardware annotation and conflicts with `--all` and `--no-fit`.
+With `--macos`, search lists **only** models that offer a macOS-only variant, showing that variant. Detection is by tag name, not the local platform, so it works on any host OS and doubles as a way to discover macOS-only models from Linux. Name-irrelevant results are dropped first (a query like `glm` won't surface an unrelated model just because it has an `nvfp4` tag). `--macos` implies hardware annotation and conflicts with `--all` and `--no-fit`.
 
 With `--wide`, search uses the full tabular view (bordered table) instead of the compact one-line layout. Works with or without `--fit`.
 
-`--no-fit` and `--fast` are kept for CLI compatibility but are effectively no-ops — library-only search is already the default. They conflict with `--fit` and `--all`.
+`--no-fit` and `--fast` are kept for CLI compatibility but are effectively no-ops — library-only search is already the default. They conflict with `--fit`, `--all`, and `--macos`.
 
 ### Resolve confirmation
 
@@ -110,7 +112,7 @@ The tool pulls through `POST /api/pull` with `stream=true`, so `--ollama-host` a
 
 ## Scraping and registry access
 
-Ollama search and tag discovery currently parse `ollama.com` HTML. The parsing code lives behind the registry interface in `src/registry.rs` and includes snapshot-style parser tests for search cards, fallback links, tag links, invalid links, and manifest-size extraction. Manifest lookups are cached during a resolver run. Approximate tag-page sizes reduce registry calls by checking plausible candidates first, while manifests still provide final sizing for selected/evaluated tags. Non-quiet resolve prints a compact reasoning table showing which candidates were manifest-checked, deferred by tag-page size, or skipped by the lookup cap. Default search mode (`search`, `search --no-fit`, or `search --fast`) performs only the library search request and prints unannotated results, so it avoids the N-plus-one network cost of tag and manifest annotation. Use `search --fit` to request hardware-aware annotation.
+Ollama search and tag discovery currently parse `ollama.com` HTML. The parsing code lives behind the registry interface in `src/registry.rs` and includes snapshot-style parser tests for search cards, fallback links, tag links, invalid links, and manifest-size extraction. Manifest lookups and per-model tag lists are cached during a resolver run. Approximate tag-page sizes reduce registry calls by checking plausible candidates first, while manifests still provide final sizing for selected/evaluated tags. Non-quiet resolve prints a compact reasoning table showing which candidates were manifest-checked, deferred by tag-page size, or skipped by the lookup cap. Default search mode (`search`, `search --no-fit`, or `search --fast`) performs only the library search request and prints unannotated results, so it avoids the N-plus-one network cost of tag and manifest annotation. Use `search --fit` to request hardware-aware annotation.
 
 ## Wrapper integration
 
@@ -125,23 +127,27 @@ ollama launch codex 'qwen2.5-coder?'
 
 For launch subcommands, the wrapper resolves only one model argument: `--model VALUE`, `--model=VALUE`, `-m VALUE`, or otherwise the first positional argument after `launch <tool>`. Other arguments that end in `?` are passed through unchanged, so prompts and option values do not accidentally trigger model resolution. The smoke harness at `tests/wrapper_smoke.sh` checks quoted-`?` resolution, exact-tag bypass, single-model resolution, prompt-like `?` pass-through, resolver dispatch, and fallback to the real Ollama binary.
 
-## Flox
+## Development and packaging
 
-Development shell:
+A Nix flake provides the dev shell — the Rust toolchain plus the macOS link dependencies (libiconv; the default stdenv supplies clang and the Apple SDK):
 
 ```bash
-flox activate
-cargo test --locked
+nix develop                 # enter the dev shell
+cargo build
+cargo test
+cargo run -- info
 bash tests/wrapper_smoke.sh
 ```
 
-Package build:
+Or run one-offs without entering the shell: `nix develop -c cargo test`.
+
+Package build via Flox (Linux and macOS):
 
 ```bash
 flox build ollama-model-resolver
 ```
 
-The Nix expression lives at `.flox/pkgs/ollama-model-resolver/default.nix` and builds from the repository root.
+The Nix package expression lives at `.flox/pkgs/ollama-model-resolver/default.nix` and builds from the repository root.
 
 
 Registry manifests remain the source of truth for exact weight and total layer sizes. Missing tag manifests may be skipped, but registry/network/parse failures stop resolution with the affected model tag so the resolver does not silently choose a smaller candidate from incomplete authoritative data. If every checked manifest is missing, the final error includes a compact list of the candidate tags tried and any candidates skipped by the manifest-lookup cap.
