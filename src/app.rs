@@ -53,7 +53,7 @@ pub fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Commands::Search { query, limit, fit, no_fit: _, all, wide, macos } => {
+        Commands::Search { query, limit, fit, no_fit, all, wide, macos } => {
             // --macos needs manifest annotation to detect the registry's macOS
             // gate, so it implies the hardware-aware (fit) search path.
             let want_fit = fit || macos;
@@ -67,7 +67,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 warn_if_split_ignored(&hw, cli.allow_split);
                 cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide, macos)
             } else {
-                cmd_search_no_fit(&metadata_client, &query, limit, wide)
+                // Default library browse shows approximate per-model sizes
+                // (tag-page ranges, no manifests). --fast/--no-fit skips those
+                // fetches for an instant name-only list.
+                cmd_search_library(&metadata_client, &query, limit, wide, !no_fit)
             }
         }
         Commands::Resolve {
@@ -341,14 +344,47 @@ fn filter_search_rows(
     (cloud, fit)
 }
 
-fn cmd_search_no_fit(client: &Client, query: &str, limit: usize, wide: bool) -> Result<()> {
+/// Library search (no fit/hardware annotation). With `with_sizes`, fetch each
+/// model's tag page (no manifests) and show an approximate download-size range;
+/// without it, an instant name-only list (one search request).
+fn cmd_search_library(
+    client: &Client,
+    query: &str,
+    limit: usize,
+    wide: bool,
+    with_sizes: bool,
+) -> Result<()> {
     let mut results = registry::search_models(client, query)?;
     registry::rank_search_results(&mut results, query);
     results.truncate(limit);
+
+    if !with_sizes {
+        if wide {
+            display::print_search_results_unannotated(&results);
+        } else {
+            display::print_search_results_unannotated_compact(&results);
+        }
+        return Ok(());
+    }
+
+    // One tag-page fetch per model for an approximate size range (cached, no
+    // manifest lookups). This is the N+1 cost the bare list avoids.
+    let mut registry_client = HttpRegistry::new(client);
+    let rows: Vec<(SearchResult, Option<String>)> = results
+        .into_iter()
+        .map(|result| {
+            let size = registry_client
+                .list_tags(&result.name)
+                .ok()
+                .and_then(|tags| display::size_range_label(&tags));
+            (result, size)
+        })
+        .collect();
+
     if wide {
-        display::print_search_results_unannotated(&results);
+        display::print_library_results_with_size(&rows);
     } else {
-        display::print_search_results_unannotated_compact(&results);
+        display::print_library_results_with_size_compact(&rows);
     }
     Ok(())
 }

@@ -27,7 +27,7 @@ When search finds no exact model name in normal interactive mode, the resolver p
 
 ### Search display modes
 
-Default search (`search qwen`) performs a library-only lookup and prints a compact one-line-per-model layout — all 20 results fit on screen without scrolling. Each row shows name, pulls, tags, updated date, and a truncated description.
+Default search (`search qwen`) lists matching models in a compact one-line-per-model layout with an **approximate download-size range** per model. The size range comes from each model's tag page (one request per model, no manifest lookups), so the default browse costs one search request plus a tag-page fetch per result. Models whose tag page exposes no parseable size show `—` (often cloud-only or single-tag flagship models). For an instant, name-only list from a single request, pass `--fast` (or `--no-fit`), which omits the size column.
 
 Across all search modes, results are re-ranked by name relevance before display. ollama.com orders matches by popularity, which can bury name matches under popular unrelated models — a search for `glm` otherwise surfaces `gemma4` first. The resolver promotes models whose name (or a `-`/`_`/`.`/`:`-separated name token) matches the query, and keeps ollama.com's popularity order within a relevance tier. Matching is token-based, not bare substring, so `emma` does not match `gemma4`. The trade-off: a family name buried mid-word (for example `codellama` for the query `llama`) counts as unrelated and ranks with the popularity padding. A footer note reminds you that the matches and their order originate from ollama.com, not this tool. Re-ranking only reorders what ollama.com returns (a fixed ~20 results, no pagination); it cannot surface a model ollama.com does not return.
 
@@ -39,7 +39,7 @@ With `--macos`, search lists **only** models that offer a macOS-only variant, sh
 
 With `--wide`, search uses the full tabular view (bordered table) instead of the compact one-line layout. Works with or without `--fit`.
 
-`--no-fit` and `--fast` are kept for CLI compatibility but are effectively no-ops — library-only search is already the default. They conflict with `--fit`, `--all`, and `--macos`.
+`--no-fit` and `--fast` skip the per-model size fetches — an instant, name-only library list from a single search request. They conflict with `--fit`, `--all`, and `--macos`.
 
 ### Resolve confirmation
 
@@ -112,7 +112,7 @@ The tool pulls through `POST /api/pull` with `stream=true`, so `--ollama-host` a
 
 ## Scraping and registry access
 
-Ollama search and tag discovery currently parse `ollama.com` HTML. The parsing code lives behind the registry interface in `src/registry.rs` and includes snapshot-style parser tests for search cards, fallback links, tag links, invalid links, and manifest-size extraction. Manifest lookups and per-model tag lists are cached during a resolver run. Approximate tag-page sizes reduce registry calls by checking plausible candidates first, while manifests still provide final sizing for selected/evaluated tags. Non-quiet resolve prints a compact reasoning table showing which candidates were manifest-checked, deferred by tag-page size, or skipped by the lookup cap. Default search mode (`search`, `search --no-fit`, or `search --fast`) performs only the library search request and prints unannotated results, so it avoids the N-plus-one network cost of tag and manifest annotation. Use `search --fit` to request hardware-aware annotation.
+Ollama search and tag discovery currently parse `ollama.com` HTML. The parsing code lives behind the registry interface in `src/registry.rs` and includes snapshot-style parser tests for search cards, fallback links, tag links, invalid links, and manifest-size extraction. Manifest lookups and per-model tag lists are cached during a resolver run. Approximate tag-page sizes reduce registry calls by checking plausible candidates first, while manifests still provide final sizing for selected/evaluated tags. Non-quiet resolve prints a compact reasoning table showing which candidates were manifest-checked, deferred by tag-page size, or skipped by the lookup cap. `search --fast` / `search --no-fit` performs only the library search request (one request, no sizes). Plain `search` additionally fetches each model's tag page for an approximate size range (N-plus-one, but no manifest lookups). `search --fit` adds registry manifest lookups for exact sizes and hardware fit.
 
 ## Wrapper integration
 

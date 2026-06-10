@@ -6,7 +6,10 @@ use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, ContentArra
 
 use crate::resolver::ResolutionDiagnostics;
 use crate::sanitize::terminal_line;
-use crate::types::{AnnotatedSearchResult, FilteredReason, FitResult, HardwareProfile, ModelVariant};
+use crate::types::{
+    AnnotatedSearchResult, FilteredReason, FitResult, HardwareProfile, ModelVariant, SearchResult,
+    TagInfo,
+};
 
 pub fn print_hardware(hw: &HardwareProfile) {
     println!("{}", "Hardware Profile".bold());
@@ -195,6 +198,77 @@ pub fn print_search_results_unannotated_compact(results: &[crate::types::SearchR
         let updated = terminal_line(&result.updated);
         let desc = truncate(&result.description, 48);
         println!("  {:<32} {:<13} {:<6} {:<15} {}", name, pulls, tags, updated, desc);
+    }
+}
+
+/// Approximate download-size range across a model's tags, from the tag page's
+/// per-tag approximate sizes (no manifest fetches). `None` if no tag exposes a
+/// parseable size. Shown in the size-annotated library view.
+///
+/// We display ollama.com's own size strings (selecting min/max by parsed bytes)
+/// rather than reformatting, so the numbers match what ollama.com shows on the
+/// page — reformatting reparsed decimal `GB` as binary `GiB` and drifted ~7%.
+pub fn size_range_label(tags: &[TagInfo]) -> Option<String> {
+    let mut sized: Vec<(u64, &str)> = tags
+        .iter()
+        .filter_map(|t| Some((t.approx_size_bytes()?, t.approx_size.as_deref()?)))
+        .collect();
+    if sized.is_empty() {
+        return None;
+    }
+    sized.sort_by_key(|(bytes, _)| *bytes);
+    let (min_bytes, min_str) = *sized.first().unwrap();
+    let (max_bytes, max_str) = *sized.last().unwrap();
+    if min_bytes == max_bytes {
+        Some(format!("~{}", terminal_line(min_str)))
+    } else {
+        Some(format!("{} – {}", terminal_line(min_str), terminal_line(max_str)))
+    }
+}
+
+/// Library search with an approximate size column (no fit/hardware annotation).
+pub fn print_library_results_with_size(rows: &[(SearchResult, Option<String>)]) {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["Model", "Approx. size", "Pulls", "Tags", "Updated", "Description"]);
+
+    for (result, size) in rows {
+        table.add_row(vec![
+            terminal_line(&result.name),
+            size.clone().unwrap_or_else(|| "—".to_string()),
+            terminal_line(&result.pulls),
+            terminal_line(&result.tag_count),
+            terminal_line(&result.updated),
+            truncate(&result.description, 80),
+        ]);
+    }
+
+    println!("{}", "Search Results".bold());
+    println!(
+        "  {}",
+        "Approximate sizes are the model's tag-page size range; re-run with --fit for exact, hardware-checked sizes.".dimmed()
+    );
+    println!("{table}");
+}
+
+pub fn print_library_results_with_size_compact(rows: &[(SearchResult, Option<String>)]) {
+    let header = "  Name                                     Approx. size         Pulls           Tags    Updated             Description";
+    println!("{}", header.dimmed());
+
+    for (result, size) in rows {
+        let name = terminal_line(&result.name);
+        let size = size.clone().unwrap_or_else(|| "—".to_string());
+        let pulls = terminal_line(&result.pulls);
+        let tags = terminal_line(&result.tag_count);
+        let updated = terminal_line(&result.updated);
+        let desc = truncate(&result.description, 40);
+        println!(
+            "  {:<32} {:<20} {:<13} {:<6} {:<15} {}",
+            name, size, pulls, tags, updated, desc
+        );
     }
 }
 
@@ -453,4 +527,39 @@ fn truncate(value: &str, max_chars: usize) -> String {
     let mut out: String = sanitized.chars().take(max_chars.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::tag_info_from_str;
+
+    fn tag_with_size(tag: &str, size: Option<&str>) -> TagInfo {
+        let mut t = tag_info_from_str("m", tag);
+        t.approx_size = size.map(str::to_string);
+        t
+    }
+
+    #[test]
+    fn size_range_label_shows_ollama_strings_min_to_max() {
+        let tags = vec![
+            tag_with_size("9b", Some("9GB")),
+            tag_with_size("1b", Some("1.5GB")),
+            tag_with_size("weird", None), // unparseable/absent sizes are ignored
+        ];
+        // Ollama's own strings, ordered by parsed bytes — NOT reformatted to GiB.
+        assert_eq!(size_range_label(&tags).unwrap(), "1.5GB – 9GB");
+    }
+
+    #[test]
+    fn size_range_label_single_value_when_one_size() {
+        let tags = vec![tag_with_size("7b", Some("4GB"))];
+        assert_eq!(size_range_label(&tags).unwrap(), "~4GB");
+    }
+
+    #[test]
+    fn size_range_label_none_without_any_size() {
+        let tags = vec![tag_with_size("7b", None), tag_with_size("13b", None)];
+        assert!(size_range_label(&tags).is_none());
+    }
 }
