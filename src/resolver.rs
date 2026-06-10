@@ -454,8 +454,7 @@ pub fn context_margin_pct(context_tokens: u32) -> u32 {
     // points, rounded up. Users can still raise --margin for more cautious
     // deployments.
     let extra_tokens = context_tokens.saturating_sub(BASE_CONTEXT_TOKENS);
-    let extra_blocks = (extra_tokens as u64 + BASE_CONTEXT_TOKENS as u64 - 1)
-        / BASE_CONTEXT_TOKENS as u64;
+    let extra_blocks = (extra_tokens as u64).div_ceil(BASE_CONTEXT_TOKENS as u64);
     extra_blocks.saturating_mul(5).min(u32::MAX as u64) as u32
 }
 

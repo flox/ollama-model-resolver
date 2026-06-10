@@ -415,7 +415,7 @@ fn darwin_free_ram_bytes() -> Option<u64> {
     let ret = unsafe {
         libc::host_statistics64(
             host,
-            libc::HOST_VM_INFO64 as i32,
+            libc::HOST_VM_INFO64,
             &mut vm_stat as *mut libc::vm_statistics64_data_t as *mut libc::integer_t,
             &mut count,
         )

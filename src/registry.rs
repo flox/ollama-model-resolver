@@ -106,7 +106,7 @@ pub fn relevance_score(query: &str, name: &str) -> u32 {
 /// Re-rank search results by `relevance_score`, highest tier first. Stable, so
 /// within a tier ollama.com's popularity order is preserved.
 pub fn rank_search_results(results: &mut [SearchResult], query: &str) {
-    results.sort_by(|a, b| relevance_score(query, &b.name).cmp(&relevance_score(query, &a.name)));
+    results.sort_by_key(|r| std::cmp::Reverse(relevance_score(query, &r.name)));
 }
 
 fn ollama_model_path(model: &str) -> String {
@@ -134,7 +134,7 @@ pub fn list_tags(client: &Client, model: &str) -> Result<Vec<TagInfo>> {
         });
     }
 
-    tags.sort_by(|a, b| natural_tag_order_key(&b.tag).cmp(&natural_tag_order_key(&a.tag)));
+    tags.sort_by_key(|t| std::cmp::Reverse(natural_tag_order_key(&t.tag)));
     Ok(tags)
 }
 

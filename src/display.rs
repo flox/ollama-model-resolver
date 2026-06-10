@@ -48,7 +48,7 @@ pub fn print_hardware(hw: &HardwareProfile) {
     );
     println!("  {:<14} {}", "Disk free:".dimmed(), ByteSize(hw.disk_free));
     println!("  {:<14} {}", "Models dir:".dimmed(), terminal_line(&hw.models_dir.display().to_string()));
-    println!("  {:<14} {}", "GPU policy:".dimmed(), hw.gpu_fit_policy.to_string());
+    println!("  {:<14} {}", "GPU policy:".dimmed(), hw.gpu_fit_policy);
     println!("  {:<14} {}", "Fit basis:".dimmed(), terminal_line(&hw.gpu_fit_basis()));
     println!();
 }
