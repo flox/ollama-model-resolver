@@ -54,24 +54,22 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Search { query, limit, fit, no_fit, all, wide, macos } => {
-            // --macos needs manifest annotation to detect the registry's macOS
-            // gate, so it implies the hardware-aware (fit) search path.
-            let want_fit = fit || macos;
+            if no_fit {
+                // --quick/--fast: the basic browse — approximate tag-page sizes,
+                // no manifest lookups or hardware fit.
+                return cmd_search_library(&metadata_client, &query, limit, wide);
+            }
+            // Default and --fit both use the manifest-sourced annotated view
+            // (exact model:tag, exact size, fit verdict) for every match.
+            // --fit additionally keeps only models that fit; default shows all.
+            let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
+            warn_if_split_ignored(&hw, cli.allow_split);
             let search_opts = ResolveOpts {
-                fit_filter: want_fit,
+                fit_filter: fit,
                 all,
                 ..opts
             };
-            if want_fit {
-                let hw = hardware::detect_with_policy(None, cli.gpu_fit_policy)?;
-                warn_if_split_ignored(&hw, cli.allow_split);
-                cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide, macos)
-            } else {
-                // Default library browse shows approximate per-model sizes
-                // (tag-page ranges, no manifests). --fast/--no-fit skips those
-                // fetches for an instant name-only list.
-                cmd_search_library(&metadata_client, &query, limit, wide, !no_fit)
-            }
+            cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide, macos)
         }
         Commands::Resolve {
             model,
@@ -344,31 +342,14 @@ fn filter_search_rows(
     (cloud, fit)
 }
 
-/// Library search (no fit/hardware annotation). With `with_sizes`, fetch each
-/// model's tag page (no manifests) and show an approximate download-size range;
-/// without it, an instant name-only list (one search request).
-fn cmd_search_library(
-    client: &Client,
-    query: &str,
-    limit: usize,
-    wide: bool,
-    with_sizes: bool,
-) -> Result<()> {
+/// `--quick` basic browse: list matches with an approximate download-size range
+/// from each model's tag page (one fetch per result, no manifest lookups, no
+/// hardware fit). The fast/cheap counterpart to the default annotated view.
+fn cmd_search_library(client: &Client, query: &str, limit: usize, wide: bool) -> Result<()> {
     let mut results = registry::search_models(client, query)?;
     registry::rank_search_results(&mut results, query);
     results.truncate(limit);
 
-    if !with_sizes {
-        if wide {
-            display::print_search_results_unannotated(&results);
-        } else {
-            display::print_search_results_unannotated_compact(&results);
-        }
-        return Ok(());
-    }
-
-    // One tag-page fetch per model for an approximate size range (cached, no
-    // manifest lookups). This is the N+1 cost the bare list avoids.
     let mut registry_client = HttpRegistry::new(client);
     let rows: Vec<(SearchResult, Option<String>)> = results
         .into_iter()

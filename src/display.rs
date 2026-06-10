@@ -161,46 +161,6 @@ pub fn print_search_results_compact(
 }
 
 
-pub fn print_search_results_unannotated(results: &[crate::types::SearchResult]) {
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .apply_modifier(UTF8_ROUND_CORNERS)
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    table.set_header(vec!["Model", "Pulls", "Tags", "Updated", "Description"]);
-
-    for result in results {
-        table.add_row(vec![
-            terminal_line(&result.name),
-            terminal_line(&result.pulls),
-            terminal_line(&result.tag_count),
-            terminal_line(&result.updated),
-            truncate(&result.description, 96),
-        ]);
-    }
-
-    println!("{}", "Search Results".bold());
-    println!(
-        "  {}",
-        "Library-only search. Re-run with --fit for hardware-aware tag and manifest annotation.".dimmed()
-    );
-    println!("{table}");
-}
-
-pub fn print_search_results_unannotated_compact(results: &[crate::types::SearchResult]) {
-    let header = "  Name                                     Pulls           Tags    Updated             Description";
-    println!("{}", header.dimmed());
-
-    for result in results {
-        let name = terminal_line(&result.name);
-        let pulls = terminal_line(&result.pulls);
-        let tags = terminal_line(&result.tag_count);
-        let updated = terminal_line(&result.updated);
-        let desc = truncate(&result.description, 48);
-        println!("  {:<32} {:<13} {:<6} {:<15} {}", name, pulls, tags, updated, desc);
-    }
-}
-
 /// Approximate download-size range across a model's tags, from the tag page's
 /// per-tag approximate sizes (no manifest fetches). `None` if no tag exposes a
 /// parseable size. Shown in the size-annotated library view.

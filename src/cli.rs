@@ -48,7 +48,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Search ollama.com. Use --fit for hardware-aware annotation.
+    /// Search ollama.com; resolves each match to an exact model:tag with its size. --fit keeps only what fits; --quick for a fast approximate browse.
     Search {
         /// Search query.
         query: String,
@@ -57,16 +57,16 @@ pub enum Commands {
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Annotate search results with hardware fit. This may fetch tag pages and registry manifests.
+        /// Show only models that fit the detected hardware (default annotates and shows every match, fitting or not).
         #[arg(long, conflicts_with = "no_fit")]
         fit: bool,
 
-        /// Show all search results including cloud-only and platform-restricted models.
+        /// Also show cloud-only and platform-restricted models (otherwise hidden).
         #[arg(long, conflicts_with = "no_fit")]
         all: bool,
 
-        /// Compatibility flag for library-only search. Library-only is now the default.
-        #[arg(long = "no-fit", visible_alias = "fast", conflicts_with = "fit")]
+        /// Quick basic browse: approximate tag-page sizes, no manifest lookups or fit checking.
+        #[arg(long = "no-fit", visible_aliases = ["fast", "quick"], conflicts_with = "fit")]
         no_fit: bool,
 
         /// Show results in a tabular format instead of the compact one-line-per-model layout.
@@ -184,6 +184,16 @@ mod tests {
                 assert!(!fit);
                 assert!(no_fit);
             }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn parses_search_quick_alias() {
+        let cli =
+            Cli::try_parse_from(["ollama-model-resolver", "search", "qwen", "--quick"]).unwrap();
+        match cli.command {
+            Commands::Search { no_fit, .. } => assert!(no_fit),
             _ => panic!("expected search command"),
         }
     }
