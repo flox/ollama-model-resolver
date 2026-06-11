@@ -1125,4 +1125,97 @@ mod tests {
         assert!(!is_macos_only_tag("9b"));
         assert!(!is_macos_only_tag("14b-q4_K_M"));
     }
+
+    fn roomy_hw() -> HardwareProfile {
+        #[allow(deprecated)]
+        HardwareProfile {
+            gpu_name: Some("test-gpu".into()),
+            vram_total: 24 << 30,
+            vram_free: 24 << 30,
+            ram_total: 64 << 30,
+            ram_available: 64 << 30,
+            disk_free: 500 << 30,
+            models_dir: std::path::PathBuf::from("/tmp"),
+            gpus: Vec::new(),
+            selected_gpu_indices: vec![0],
+            cuda_visible_devices: None,
+            gpu_fit_policy: crate::types::GpuFitPolicy::Best,
+            unified_mem_total: 0,
+        }
+    }
+
+    fn annotate_opts() -> ResolveOpts {
+        ResolveOpts {
+            allow_split: false,
+            margin_pct: 20,
+            context_tokens: 8_192,
+            max_manifest_lookups: Some(5),
+            fit_filter: false,
+            all: false,
+        }
+    }
+
+    #[test]
+    fn annotate_one_surfaces_macos_row_alongside_runnable_when_shown() {
+        use crate::types::tag_info_from_str;
+        // Mixed: a normal 9b plus a macOS-only nvfp4 variant.
+        let mut reg = TagOnlyRegistry {
+            tags: vec![
+                tag_info_from_str("qwen3.5", "9b"),
+                tag_info_from_str("qwen3.5", "32b-nvfp4"),
+            ],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("qwen3.5"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "qwen3.5", // exact name match → relevance > 0
+            true,      // show_macos
+        );
+        assert!(ann.normal.is_some(), "runnable row retained");
+        assert!(ann.macos.is_some(), "macOS-only variant surfaced as its own row");
+        assert!(!ann.macos_hidden);
+    }
+
+    #[test]
+    fn annotate_one_counts_macos_hidden_when_not_shown() {
+        use crate::types::tag_info_from_str;
+        let mut reg = TagOnlyRegistry {
+            tags: vec![
+                tag_info_from_str("qwen3.5", "9b"),
+                tag_info_from_str("qwen3.5", "32b-nvfp4"),
+            ],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("qwen3.5"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "qwen3.5",
+            false, // Linux default view: macOS-only row hidden
+        );
+        assert!(ann.macos.is_none(), "macOS-only row hidden");
+        assert!(ann.macos_hidden, "but counted toward the --macos footer hint");
+    }
+
+    #[test]
+    fn annotate_one_skips_macos_row_for_irrelevant_padding_result() {
+        use crate::types::tag_info_from_str;
+        // gemma4 has an nvfp4 tag, but a "glm" query doesn't match its name, so
+        // it must NOT contribute a macOS-only row (the gemma4-for-glm case).
+        let mut reg = TagOnlyRegistry {
+            tags: vec![tag_info_from_str("gemma4", "9b-nvfp4")],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("gemma4"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "glm",
+            true,
+        );
+        assert!(ann.macos.is_none());
+        assert!(!ann.macos_hidden);
+    }
 }
