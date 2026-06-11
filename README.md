@@ -57,7 +57,7 @@ The resolver ranks variants by these rules:
 6. If none of those fit, fetch deferred candidates in ranked order so a pessimistic page-size hint cannot hide a fitting model.
 7. Return the first fitting candidate; otherwise report the smallest evaluated non-fitting candidate for the warning / try-anyway prompt unless no manifest can be read.
 
-Use `--max-manifest-lookups <N>` to cap manifest lookups per model resolution when performance matters more than exhaustive fallback checking. The default has no lookup cap, so correctness is favored over speed. `search` is library-only by default and performs one Ollama library request. Use `search --fit` when you want hardware-aware annotation and filtering; in that mode, the cap applies separately to each model that receives fit annotation. Use `search --fit --all` to annotate without filtering. `search --no-fit` and `search --fast` remain accepted aliases for library-only search.
+Use `--max-manifest-lookups <N>` to cap manifest lookups per model resolution. For `resolve` the default is uncapped, so correctness is favored over speed. Annotated `search` (the default view and `--fit`/`--all`) instead applies a default cap of 5 lookups per model, since browsing a page of results tolerates an approximate verdict and shouldn't probe every tag of a model that doesn't fit; pass `--max-manifest-lookups <N>` to override it. The `--quick` browse (aliases `--fast`/`--no-fit`) does no manifest lookups at all.
 
 Global options include `--pull-stall-timeout <SECONDS>` for long model downloads. The default is 300 seconds without receiving any pull stream data. Pulls have no total request deadline, so a download may run for much longer as long as Ollama keeps sending stream events.
 

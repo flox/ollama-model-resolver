@@ -18,6 +18,12 @@ use crate::types::{
 const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Default cap on registry manifest lookups per model when annotating search
+/// results, so a page of results (especially non-fitting models) doesn't probe
+/// every tag. Browsing tolerates an approximate verdict; `--max-manifest-lookups`
+/// overrides it, and `resolve` is uncapped by default.
+const SEARCH_MANIFEST_LOOKUP_CAP: usize = 5;
+
 pub fn run(cli: Cli) -> Result<()> {
     if cli.margin > 500 {
         return Err(ResolverError::InvalidInput(
@@ -67,6 +73,14 @@ pub fn run(cli: Cli) -> Result<()> {
             let search_opts = ResolveOpts {
                 fit_filter: fit,
                 all,
+                // Bound per-model manifest probing when annotating a whole page
+                // of results: search is browsing, so an approximate verdict is
+                // fine and we don't exhaustively probe every tag of a model that
+                // doesn't fit. An explicit --max-manifest-lookups still wins;
+                // `resolve` (the actual pull) stays uncapped for correctness.
+                max_manifest_lookups: cli
+                    .max_manifest_lookups
+                    .or(Some(SEARCH_MANIFEST_LOOKUP_CAP)),
                 ..opts
             };
             cmd_search(&metadata_client, &query, limit, &hw, &search_opts, all, wide, macos)
@@ -982,6 +996,22 @@ mod tests {
         let counts = filter_search_rows(&mut rows, true, false);
         assert_eq!(counts, (1, 1)); // 1 cloud, 1 non-fitting hidden
         assert_eq!(names(&rows), vec!["fits"]);
+    }
+
+    #[test]
+    fn default_view_keeps_non_fitting_hides_cloud_only() {
+        use crate::types::FitResult;
+        let mut rows = vec![
+            annotated_row("cloud", Some(FilteredReason::CloudOnly), None),
+            annotated_row("too-big", None, Some(FitResult::DoesNotFit { need: 10, have: 1 })),
+            annotated_row("fits", None, Some(FitResult::FitsVram)),
+        ];
+        // Default view (fit_filter = false): keep fitting AND non-fitting; hide cloud-only.
+        let counts = filter_search_rows(&mut rows, false, false);
+        assert_eq!(counts, (1, 0)); // cloud hidden; non-fitting NOT hidden
+        let mut kept = names(&rows);
+        kept.sort();
+        assert_eq!(kept, vec!["fits", "too-big"]);
     }
 
     #[test]
