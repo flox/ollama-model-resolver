@@ -4,6 +4,7 @@ pub mod display;
 pub mod error;
 pub mod hardware;
 pub mod local;
+pub mod parallel;
 pub mod registry;
 pub mod resolver;
 pub mod sanitize;
