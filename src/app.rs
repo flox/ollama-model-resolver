@@ -8,6 +8,7 @@ use crate::display;
 use crate::error::{ResolverError, Result};
 use crate::hardware;
 use crate::local;
+use crate::parallel;
 use crate::registry::{self, HttpRegistry, Registry};
 use crate::resolver::{self, ResolveOpts};
 use crate::sanitize::terminal_line;
@@ -23,6 +24,11 @@ const PULL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// every tag. Browsing tolerates an approximate verdict; `--max-manifest-lookups`
 /// overrides it, and `resolve` is uncapped by default.
 const SEARCH_MANIFEST_LOOKUP_CAP: usize = 5;
+
+/// Worker threads used to annotate a page of search results concurrently. The
+/// work is network-bound, so this is about overlapping round-trips (and staying
+/// polite to ollama.com / the registry), not CPU parallelism.
+const SEARCH_ANNOTATION_CONCURRENCY: usize = 8;
 
 pub fn run(cli: Cli) -> Result<()> {
     if cli.margin > 500 {
@@ -166,9 +172,8 @@ fn cmd_search(
     // unrelated models; re-rank by name relevance so matches come first.
     registry::rank_search_results(&mut results, query);
 
-    let mut registry_client = HttpRegistry::new(client);
-
     if macos_only {
+        let mut registry_client = HttpRegistry::new(client);
         return cmd_search_macos_only(&mut registry_client, query, limit, hw, results, wide);
     }
 
@@ -179,31 +184,31 @@ fn cmd_search(
     // --all anywhere); on Linux they can't run, so they're hidden from the
     // default view and the footer hints to use --macos.
     let show_macos = cfg!(target_os = "macos") || all;
+
+    // Each model's annotation is independent and network-bound (a tag page plus
+    // up to SEARCH_MANIFEST_LOOKUP_CAP manifest fetches), so resolve them across
+    // a bounded worker pool. Each worker gets its own HttpRegistry (caches are
+    // keyed per-model, so there's nothing to share), and par_map preserves input
+    // order — so the output is identical to the serial version, just faster.
+    let annotations = parallel::par_map(
+        &results,
+        SEARCH_ANNOTATION_CONCURRENCY,
+        || HttpRegistry::new(client),
+        |registry, result| annotate_one(registry, result, hw, opts, query, show_macos),
+    );
+
     let mut normal_rows: Vec<AnnotatedSearchResult> = Vec::new();
     let mut macos_rows: Vec<AnnotatedSearchResult> = Vec::new();
     let mut macos_hidden = 0u64;
-
-    for result in results {
-        // Only surface a macOS-only variant for a name-relevant model, so a
-        // popular-but-unrelated padding result (e.g. gemma4 for "glm") doesn't
-        // contribute a macOS-only row. list_tags is cached → shares the fetch
-        // with resolve below.
-        let macos_row = if registry::relevance_score(query, &result.name) > 0 {
-            annotate_macos_only(&mut registry_client, result.clone())
-        } else {
-            None
-        };
-        let normal = annotate_search_result(&mut registry_client, result, hw, opts);
-
-        // An entirely-macOS-only model resolves to platform-restricted; its
-        // macOS-only row represents it, so drop the redundant normal row.
-        if !matches!(normal.filtered, Some(FilteredReason::PlatformRestricted)) {
-            normal_rows.push(normal);
+    for ann in annotations {
+        if let Some(row) = ann.normal {
+            normal_rows.push(row);
         }
-        match macos_row {
-            Some(row) if show_macos => macos_rows.push(row),
-            Some(_) => macos_hidden += 1,
-            None => {}
+        if let Some(row) = ann.macos {
+            macos_rows.push(row);
+        }
+        if ann.macos_hidden {
+            macos_hidden += 1;
         }
     }
 
@@ -282,6 +287,65 @@ fn cmd_search_macos_only<R: Registry>(
 /// Build a macOS-only search row for a model, or None if it offers no macOS-only
 /// variant. Picks the largest such variant as the representative; its size/fit
 /// is unknown (the manifest is gated), so the row carries `FitResult::MacosOnly`.
+/// The per-model outcome of annotating one search result: the runnable row
+/// (`None` when the model is entirely macOS-gated and represented by its
+/// macOS-only row instead), an optional macOS-only row, and whether a
+/// macOS-only variant existed but was hidden (Linux default view).
+struct ModelAnnotation {
+    normal: Option<AnnotatedSearchResult>,
+    macos: Option<AnnotatedSearchResult>,
+    macos_hidden: bool,
+}
+
+/// Annotate a single search result for the default/`--fit` view. Pure with
+/// respect to its inputs (the only side effects are `registry` fetches), so it
+/// is safe to run concurrently across results, one `registry` per worker.
+fn annotate_one<R: Registry>(
+    registry: &mut R,
+    result: &SearchResult,
+    hw: &HardwareProfile,
+    opts: &ResolveOpts,
+    query: &str,
+    show_macos: bool,
+) -> ModelAnnotation {
+    // Only surface a macOS-only variant for a name-relevant model, so a
+    // popular-but-unrelated padding result (e.g. gemma4 for "glm") doesn't
+    // contribute a macOS-only row. list_tags is cached → shares the fetch with
+    // the resolve below within this worker's registry.
+    let macos_row = if registry::relevance_score(query, &result.name) > 0 {
+        annotate_macos_only(registry, result.clone())
+    } else {
+        None
+    };
+
+    // An entirely-macOS-only model resolves to platform-restricted; its
+    // macOS-only row represents it, so drop the redundant normal row.
+    let annotated = annotate_search_result(registry, result.clone(), hw, opts);
+    let normal = if matches!(annotated.filtered, Some(FilteredReason::PlatformRestricted)) {
+        None
+    } else {
+        Some(annotated)
+    };
+
+    match macos_row {
+        Some(row) if show_macos => ModelAnnotation {
+            normal,
+            macos: Some(row),
+            macos_hidden: false,
+        },
+        Some(_) => ModelAnnotation {
+            normal,
+            macos: None,
+            macos_hidden: true,
+        },
+        None => ModelAnnotation {
+            normal,
+            macos: None,
+            macos_hidden: false,
+        },
+    }
+}
+
 fn annotate_macos_only<R: Registry>(
     registry: &mut R,
     result: SearchResult,
@@ -1060,5 +1124,98 @@ mod tests {
         assert!(is_macos_only_tag("35b-a3b-NVFP4"));
         assert!(!is_macos_only_tag("9b"));
         assert!(!is_macos_only_tag("14b-q4_K_M"));
+    }
+
+    fn roomy_hw() -> HardwareProfile {
+        #[allow(deprecated)]
+        HardwareProfile {
+            gpu_name: Some("test-gpu".into()),
+            vram_total: 24 << 30,
+            vram_free: 24 << 30,
+            ram_total: 64 << 30,
+            ram_available: 64 << 30,
+            disk_free: 500 << 30,
+            models_dir: std::path::PathBuf::from("/tmp"),
+            gpus: Vec::new(),
+            selected_gpu_indices: vec![0],
+            cuda_visible_devices: None,
+            gpu_fit_policy: crate::types::GpuFitPolicy::Best,
+            unified_mem_total: 0,
+        }
+    }
+
+    fn annotate_opts() -> ResolveOpts {
+        ResolveOpts {
+            allow_split: false,
+            margin_pct: 20,
+            context_tokens: 8_192,
+            max_manifest_lookups: Some(5),
+            fit_filter: false,
+            all: false,
+        }
+    }
+
+    #[test]
+    fn annotate_one_surfaces_macos_row_alongside_runnable_when_shown() {
+        use crate::types::tag_info_from_str;
+        // Mixed: a normal 9b plus a macOS-only nvfp4 variant.
+        let mut reg = TagOnlyRegistry {
+            tags: vec![
+                tag_info_from_str("qwen3.5", "9b"),
+                tag_info_from_str("qwen3.5", "32b-nvfp4"),
+            ],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("qwen3.5"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "qwen3.5", // exact name match → relevance > 0
+            true,      // show_macos
+        );
+        assert!(ann.normal.is_some(), "runnable row retained");
+        assert!(ann.macos.is_some(), "macOS-only variant surfaced as its own row");
+        assert!(!ann.macos_hidden);
+    }
+
+    #[test]
+    fn annotate_one_counts_macos_hidden_when_not_shown() {
+        use crate::types::tag_info_from_str;
+        let mut reg = TagOnlyRegistry {
+            tags: vec![
+                tag_info_from_str("qwen3.5", "9b"),
+                tag_info_from_str("qwen3.5", "32b-nvfp4"),
+            ],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("qwen3.5"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "qwen3.5",
+            false, // Linux default view: macOS-only row hidden
+        );
+        assert!(ann.macos.is_none(), "macOS-only row hidden");
+        assert!(ann.macos_hidden, "but counted toward the --macos footer hint");
+    }
+
+    #[test]
+    fn annotate_one_skips_macos_row_for_irrelevant_padding_result() {
+        use crate::types::tag_info_from_str;
+        // gemma4 has an nvfp4 tag, but a "glm" query doesn't match its name, so
+        // it must NOT contribute a macOS-only row (the gemma4-for-glm case).
+        let mut reg = TagOnlyRegistry {
+            tags: vec![tag_info_from_str("gemma4", "9b-nvfp4")],
+        };
+        let ann = annotate_one(
+            &mut reg,
+            &search_result("gemma4"),
+            &roomy_hw(),
+            &annotate_opts(),
+            "glm",
+            true,
+        );
+        assert!(ann.macos.is_none());
+        assert!(!ann.macos_hidden);
     }
 }
